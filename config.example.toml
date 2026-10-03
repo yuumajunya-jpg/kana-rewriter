@@ -1,0 +1,21 @@
+backend = "llama_cpp"
+# この設定ファイルからの相対パス、または絶対パス
+model_path = "models/jinen-v1-xsmall-Q5_K_M.gguf"
+model_format = "jinen_v1" # 専用マーカー + 生のcompletion API。左文脈対応
+context_chars = 64 # 文脈の最大文字数
+n_ctx = 0 # GGUFの学習時のコンテキスト長を使用
+n_gpu_layers = 0 # CPU。GPU対応版を入れた場合は -1 で全層をGPUへ
+# 汎用チャットモデルを使う場合: model_format = "chat"
+# zenz-v3.2の場合: model_format = "zenz_v3_2"（左右文脈。独自ランタイムが必要）
+# chat_format = "chatml" # chatの場合のみ
+
+# 任意: backend = "http" にすると外部のローカルサーバーを使用
+endpoint = "http://127.0.0.1:8080/v1/completions" # 変換専用モデル用。chatは /v1/chat/completions
+model = "local"
+# Ollama: endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+# modelには ollama list に表示されるモデル名を指定します。
+timeout_seconds = 30 # HTTPの場合のみ。直接推論の時間制限ではありません
+max_chars = 1000
+max_tokens = 256
+# 認証が必要な場合、キーを格納した環境変数名を指定
+api_key_env = "KANA_REWRITER_API_KEY"

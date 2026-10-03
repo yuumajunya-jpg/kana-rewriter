@@ -1,0 +1,1 @@
+"""Committed-text Japanese conversion."""
