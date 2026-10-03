@@ -127,11 +127,11 @@ class Desktop:
             finally:
                 saved.release()
 
-    def capture(self, mode, max_chars):
+    def capture(self, mode, max_chars, trigger_keys=()):
         # Wait for the trigger's modifier keys to be released.
         target = focus()
         deadline = time.monotonic() + 2
-        while any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x4B, 0x4A)):
+        while any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C) + tuple(trigger_keys)):
             if time.monotonic() > deadline:
                 raise RuntimeError("ショートカットキーを離してください")
             time.sleep(0.01)

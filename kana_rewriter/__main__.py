@@ -6,6 +6,7 @@ import time
 import logging
 
 from .core import Config, Converter, apply_result
+from .hotkeys import parse_hotkey
 
 
 def main():
@@ -37,6 +38,9 @@ def main():
 
 def run_windows(converter, config):
     from .windows import Desktop, user, W
+    bindings = {1: parse_hotkey(config.hotkey_line), 2: parse_hotkey(config.hotkey_selection)}
+    if config.hotkey_quit:
+        bindings[3] = parse_hotkey(config.hotkey_quit)
     registered = []
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
@@ -45,18 +49,23 @@ def run_windows(converter, config):
                       stop_at_kanji=config.stop_at_kanji,
                       trailing_punctuation=config.trailing_punctuation)
     try:
-        for ident, key in ((1, 0x4B), (2, 0x4A)):
-            if not user.RegisterHotKey(None, ident, 0x4003, key):  # Ctrl+Alt+NOREPEAT
-                raise RuntimeError("ショートカットが使用中です。他の起動済みプロセスを確認してください")
+        for ident, binding in bindings.items():
+            if not user.RegisterHotKey(None, ident, 0x4000 | binding.modifiers, binding.key):
+                raise RuntimeError(f"ショートカット {binding.label} を登録できません。他アプリとの競合やOSの予約キーを確認してください")
             registered.append(ident)
-        print("起動: Ctrl+Alt+K = カーソル左の区切りまで / Ctrl+Alt+J = 選択範囲 / この端末でCtrl+C = 終了", flush=True)
+        quit_label = f" / {bindings[3].label} = 終了" if 3 in bindings else ""
+        print(f"起動: {bindings[1].label} = カーソル左の区切りまで / "
+              f"{bindings[2].label} = 選択範囲{quit_label} / この端末でCtrl+C = 終了", flush=True)
         message = W.MSG()
         while True:
             while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
-                if message.message == 0x0312 and pending is None:
+                if message.message == 0x0312 and message.wParam == 3 and 3 in bindings:
+                    print("終了します", flush=True)
+                    return 0
+                if message.message == 0x0312 and message.wParam in (1, 2) and pending is None:
                     try:
                         captured = desktop.capture("line" if message.wParam == 1 else "selection",
-                                                   config.max_chars)
+                                                   config.max_chars, trigger_keys=(bindings[message.wParam].key,))
                         pending = (pool.submit(converter.convert_selection, captured.source,
                                                captured.left_context, captured.right_context), captured)
                         print("変換中（操作すると差し替えを中止します）…", flush=True)

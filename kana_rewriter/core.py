@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .text import TextRegion, zenz_prompt, jinen_prompt, MARKERS, reading_spans, TRAILING_PUNCTUATION
+from .hotkeys import parse_hotkey
 logger = logging.getLogger(__name__)
 
 
@@ -30,8 +31,18 @@ class Config:
     conversion_delimiters: str = "。"
     stop_at_kanji: bool = True
     trailing_punctuation: str = TRAILING_PUNCTUATION
+    hotkey_line: str = "Ctrl+Alt+K"
+    hotkey_selection: str = "Ctrl+Alt+J"
+    hotkey_quit: str = ""
 
     def __post_init__(self):
+        if not isinstance(self.hotkey_quit, str):
+            raise ValueError("hotkey_quitは文字列で指定してください（空文字列で無効化）")
+        bindings = [parse_hotkey(self.hotkey_line), parse_hotkey(self.hotkey_selection)]
+        if self.hotkey_quit:
+            bindings.append(parse_hotkey(self.hotkey_quit))
+        if len({(binding.modifiers, binding.key) for binding in bindings}) != len(bindings):
+            raise ValueError("変換・選択範囲・終了のショートカットを重複させないでください")
         if (not isinstance(self.conversion_delimiters, str)
                 or not isinstance(self.trailing_punctuation, str)
                 or not isinstance(self.stop_at_kanji, bool)):
