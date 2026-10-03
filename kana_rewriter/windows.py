@@ -5,7 +5,7 @@ import time
 import logging
 
 from .core import Capture
-from .text import split_at_caret
+from .text import split_at_caret, TRAILING_PUNCTUATION
 from .clipboard import Clipboard, ClipboardWriteError, pump_sent_messages
 
 user = C.WinDLL("user32", use_last_error=True)
@@ -80,9 +80,13 @@ def focus():
 
 
 class Desktop:
-    def __init__(self, paste_wait_seconds=0.5):
+    def __init__(self, paste_wait_seconds=0.5, conversion_delimiters="。",
+                 stop_at_kanji=True, trailing_punctuation=TRAILING_PUNCTUATION):
         self.clipboard = None
         self.paste_wait_seconds = paste_wait_seconds
+        self.conversion_delimiters = conversion_delimiters
+        self.stop_at_kanji = stop_at_kanji
+        self.trailing_punctuation = trailing_punctuation
 
     def close(self):
         if self.clipboard is not None:
@@ -145,7 +149,8 @@ class Desktop:
             text = self.copy_selection()
             if not before or not text.startswith(before):
                 raise RuntimeError("行とカーソル位置を対応づけられません。選択範囲モードを使用してください")
-            region = split_at_caret(text, len(before))
+            region = split_at_caret(text, len(before), self.conversion_delimiters,
+                                    self.stop_at_kanji, self.trailing_punctuation)
         else:
             text = self.copy_selection()
             region = None

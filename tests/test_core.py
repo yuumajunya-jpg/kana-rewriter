@@ -14,6 +14,20 @@ def response(text="今日は良い天気です", reason="stop"):
 
 
 class CoreTests(unittest.TestCase):
+    def test_boundary_settings_load_from_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text('conversion_delimiters = "。、!?"\nstop_at_kanji = false\ntrailing_punctuation = "?!"\n',
+                            encoding="utf-8")
+            config = Config.load(str(path))
+            self.assertEqual(config.conversion_delimiters, "。、!?")
+            self.assertFalse(config.stop_at_kanji)
+            self.assertEqual(config.trailing_punctuation, "?!")
+        for options in ({"stop_at_kanji": "true"}, {"conversion_delimiters": ["。"]},
+                        {"trailing_punctuation": None}):
+            with self.assertRaises(ValueError):
+                Config(**options)
+
     def test_mixed_selection_preserves_non_kana_and_passes_context(self):
         client = Converter(Config())
         with patch.object(client, "convert", side_effect=["歯医者", "廃車"]) as convert:

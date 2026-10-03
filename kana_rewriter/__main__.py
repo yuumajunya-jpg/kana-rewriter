@@ -40,13 +40,16 @@ def run_windows(converter, config):
     registered = []
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
-    desktop = Desktop(paste_wait_seconds=config.paste_wait_seconds)
+    desktop = Desktop(paste_wait_seconds=config.paste_wait_seconds,
+                      conversion_delimiters=config.conversion_delimiters,
+                      stop_at_kanji=config.stop_at_kanji,
+                      trailing_punctuation=config.trailing_punctuation)
     try:
         for ident, key in ((1, 0x4B), (2, 0x4A)):
             if not user.RegisterHotKey(None, ident, 0x4003, key):  # Ctrl+Alt+NOREPEAT
                 raise RuntimeError("ショートカットが使用中です。他の起動済みプロセスを確認してください")
             registered.append(ident)
-        print("起動: Ctrl+Alt+K = カーソル直前のひらがな / Ctrl+Alt+J = 選択範囲 / この端末でCtrl+C = 終了", flush=True)
+        print("起動: Ctrl+Alt+K = カーソル左の区切りまで / Ctrl+Alt+J = 選択範囲 / この端末でCtrl+C = 終了", flush=True)
         message = W.MSG()
         while True:
             while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
@@ -54,8 +57,7 @@ def run_windows(converter, config):
                     try:
                         captured = desktop.capture("line" if message.wParam == 1 else "selection",
                                                    config.max_chars)
-                        convert = converter.convert if captured.region is not None else converter.convert_selection
-                        pending = (pool.submit(convert, captured.source,
+                        pending = (pool.submit(converter.convert_selection, captured.source,
                                                captured.left_context, captured.right_context), captured)
                         print("変換中（操作すると差し替えを中止します）…", flush=True)
                     except Exception as exc:

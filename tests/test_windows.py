@@ -59,11 +59,26 @@ class WindowsTests(unittest.TestCase):
                 patch.object(desktop, "stamp", return_value=("target", 1, 2)), \
                 patch.object(desktop, "copy_selection", side_effect=["歯が痛いので、はいしゃ", "歯が痛いので、はいしゃに行く"]):
             capture = desktop.capture("line", 1000)
-        self.assertEqual(capture.source, "はいしゃ")
-        self.assertEqual(capture.left_context, "歯が痛いので、")
+        self.assertEqual(capture.source, "いので、はいしゃ")
+        self.assertEqual(capture.left_context, "歯が痛")
         self.assertEqual(capture.right_context, "に行く")
         self.assertEqual([call.args for call in chord.call_args_list],
                          [(0x10, 0x24), (0x25,), (0x10, 0x23)])
+
+    def test_line_capture_uses_configured_delimiters(self):
+        from kana_rewriter.windows import Desktop
+        desktop = Desktop(conversion_delimiters="。、")
+        text = "まえ、きょう?"
+        with patch("kana_rewriter.windows.focus", return_value="target"), \
+                patch("kana_rewriter.windows.user.GetAsyncKeyState", return_value=0), \
+                patch("kana_rewriter.windows.time.sleep"), \
+                patch("kana_rewriter.windows.chord"), \
+                patch.object(desktop, "stamp", return_value=("target", 1, 2)), \
+                patch.object(desktop, "copy_selection", side_effect=[text, text]):
+            capture = desktop.capture("line", 1000)
+        self.assertEqual(capture.source, "きょう")
+        self.assertEqual(capture.left_context, "まえ、")
+        self.assertEqual(capture.right_context, "?")
 
     def test_line_mismatch_aborts(self):
         from kana_rewriter.windows import Desktop

@@ -7,7 +7,7 @@ import tomllib
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
-from .text import TextRegion, zenz_prompt, jinen_prompt, MARKERS, reading_spans
+from .text import TextRegion, zenz_prompt, jinen_prompt, MARKERS, reading_spans, TRAILING_PUNCTUATION
 logger = logging.getLogger(__name__)
 
 
@@ -27,8 +27,15 @@ class Config:
     max_tokens: int = 256
     paste_wait_seconds: float = 0.1
     api_key_env: str = "KANA_REWRITER_API_KEY"
+    conversion_delimiters: str = "。"
+    stop_at_kanji: bool = True
+    trailing_punctuation: str = TRAILING_PUNCTUATION
 
     def __post_init__(self):
+        if (not isinstance(self.conversion_delimiters, str)
+                or not isinstance(self.trailing_punctuation, str)
+                or not isinstance(self.stop_at_kanji, bool)):
+            raise ValueError("conversion_delimiters・trailing_punctuationは文字列、stop_at_kanjiは真偽値です")
         if self.backend not in {"llama_cpp", "http"}:
             raise ValueError("backendはllama_cppまたはhttpです")
         if self.model_format not in {"jinen_v1", "zenz_v3_2", "chat"}:

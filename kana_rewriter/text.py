@@ -11,6 +11,11 @@ def is_hiragana(character: str) -> bool:
     return "\u3041" <= character <= "\u3096" or character in "\u3099\u309a\u309d\u309eー"
 
 
+def is_kanji(character: str) -> bool:
+    name = unicodedata.name(character, "")
+    return name.startswith(("CJK UNIFIED IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-")) or character in "々〆〇"
+
+
 def reading_spans(text: str):
     """Split a mixed selection into contiguous kana spans without morphology."""
     start = None
@@ -35,23 +40,25 @@ class TextRegion:
         return self.left + converted + self.right
 
 
-def split_at_caret(text: str, caret: int) -> TextRegion:
-    """Take the hiragana run before the caret, skipping trailing punctuation.
-
-    Kanji, punctuation (including 。), whitespace, Latin letters and katakana
-    stop the scan. No morphology or particle detection is attempted.
-    """
+def split_at_caret(text: str, caret: int, conversion_delimiters: str = "。",
+                   stop_at_kanji: bool = True,
+                   trailing_punctuation: str = TRAILING_PUNCTUATION) -> TextRegion:
+    """Scan left to configured boundaries, retaining trailing punctuation."""
     if not 0 <= caret <= len(text):
         raise ValueError("カーソル位置が文字列の範囲外です")
     # Keep punctuation verbatim in the right context, including runs such as ?!.
     end = caret
-    while end > 0 and text[end - 1] in TRAILING_PUNCTUATION:
+    while end > 0 and text[end - 1] in trailing_punctuation:
         end -= 1
     start = end
-    while start > 0 and is_hiragana(text[start - 1]):
+    while start > 0:
+        character = text[start - 1]
+        if (character in conversion_delimiters or character in "\r\n"
+                or (stop_at_kanji and is_kanji(character))):
+            break
         start -= 1
-    if start == end:
-        raise ValueError("カーソル直前に変換対象のひらがながありません")
+    if not any(reading_spans(text[start:end])):
+        raise ValueError("区切り内に変換対象のかながありません")
     return TextRegion(text[:start], text[start:end], text[end:])
 
 

@@ -10,13 +10,28 @@ class ZenzTests(unittest.TestCase):
         line = "歯が痛いので、はいしゃに行く"
         caret = len("歯が痛いので、はいしゃ")
         region = split_at_caret(line, caret)
-        self.assertEqual(region, TextRegion("歯が痛いので、", "はいしゃ", "に行く"))
-        self.assertEqual(region.rebuild("歯医者"), "歯が痛いので、歯医者に行く")
+        self.assertEqual(region, TextRegion("歯が痛", "いので、はいしゃ", "に行く"))
+        self.assertEqual(region.rebuild("いので、歯医者"), "歯が痛いので、歯医者に行く")
 
     def test_scan_stops_at_boundaries(self):
-        for boundary in ("。", "、", "漢", " ", "A", "カ", "\n"):
+        for boundary in ("。", "漢", "𠮷", "々", "\n"):
             line = "まえ" + boundary + "きょう"
             self.assertEqual(split_at_caret(line, len(line)).target, "きょう")
+
+    def test_default_boundary_is_only_kanji_and_period(self):
+        for middle in ("、", "?", "!", " ", "A", "カ"):
+            line = "前。まえ" + middle + "きょう"
+            self.assertEqual(split_at_caret(line, len(line)).target, "まえ" + middle + "きょう")
+
+    def test_configured_boundaries_and_trailing_characters_are_independent(self):
+        line = "前。まえ、きょう?"
+        self.assertEqual(split_at_caret(line, len(line)), TextRegion("前。", "まえ、きょう", "?"))
+        self.assertEqual(split_at_caret(line, len(line), conversion_delimiters="。、"),
+                         TextRegion("前。まえ、", "きょう", "?"))
+        self.assertEqual(split_at_caret(line, len(line), trailing_punctuation="。"),
+                         TextRegion("前。", "まえ、きょう?", ""))
+        self.assertEqual(split_at_caret("前きょう", 4, stop_at_kanji=False),
+                         TextRegion("", "前きょう", ""))
 
     def test_simple_rule_includes_particles(self):
         self.assertEqual(split_at_caret("私はきょう", 5), TextRegion("私", "はきょう", ""))
