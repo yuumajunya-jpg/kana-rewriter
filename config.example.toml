@@ -7,7 +7,7 @@ conversion_delimiters = "。" # Kで左へ走査するときの区切り。各�
 stop_at_kanji = true # Kの走査を漢字で止める
 trailing_punctuation = "。、？！?!,.，．" # カーソル直前で飛ばして保持する記号。区切りとは別設定
 hotkey_line = "Ctrl+Enter" # カーソル左の区切りまで変換
-hotkey_selection = "Ctrl+Alt+J" # 選択範囲を変換
+hotkey_selection = "Ctrl+Shift+Enter" # 選択範囲を変換
 hotkey_quit = "" # 任意の終了キー。例: "Ctrl+Alt+Q"。空文字列なら登録しない
 edit_backend = "auto" # auto: 標準Edit/RichEditはWin32、それ以外はUIA。clipboardで旧方式
 uia_ime_check = "auto" # Chromiumの残存範囲は中止判定に使わない。strictは厳密判定、offは照会なし
@@ -16,6 +16,9 @@ max_document_chars = 200000 # 本文取得の上限。超えた入力欄は中�
 n_ctx = 0 # GGUFの学習時のコンテキスト長を使用
 n_gpu_layers = 0 # CPU。GPU対応版を入れた場合は -1 で全層をGPUへ
 # 汎用チャットモデルを使う場合: model_format = "chat"
+# jinen v2の場合は上の2項目を変更:
+# model_path = "models/jinen-v2-small-Q5_K_M.gguf"
+# model_format = "jinen_v2" # 左文脈対応、プロンプト全体をNFKC正規化
 # zenz-v3.2の場合: model_format = "zenz_v3_2"（左右文脈。独自ランタイムが必要）
 # chat_format = "chatml" # chatの場合のみ
 

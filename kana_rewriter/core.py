@@ -7,7 +7,7 @@ import tomllib
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
-from .text import TextRegion, zenz_prompt, jinen_prompt, MARKERS, reading_spans, TRAILING_PUNCTUATION
+from .text import TextRegion, zenz_prompt, jinen_prompt, jinen_v2_prompt, MARKERS, reading_spans, TRAILING_PUNCTUATION
 from .hotkeys import parse_hotkey
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,8 @@ class Config:
             raise ValueError("conversion_delimiters・trailing_punctuationは文字列、stop_at_kanjiは真偽値です")
         if self.backend not in {"llama_cpp", "http"}:
             raise ValueError("backendはllama_cppまたはhttpです")
-        if self.model_format not in {"jinen_v1", "zenz_v3_2", "chat"}:
-            raise ValueError("model_formatはjinen_v1、zenz_v3_2、chatです")
+        if self.model_format not in {"jinen_v1", "jinen_v2", "zenz_v3_2", "chat"}:
+            raise ValueError("model_formatはjinen_v1、jinen_v2、zenz_v3_2、chatです")
         if not 0 <= self.context_chars <= 1000:
             raise ValueError("context_charsは0〜1000です")
         if not self.model_path or (self.n_ctx != 0 and self.n_ctx < 512) or self.n_gpu_layers < -1:
@@ -126,13 +126,18 @@ class Converter:
         c = self.config
         if not source.strip() or len(source) > c.max_chars:
             raise ValueError("対象が空、または文字数上限を超えています")
-        if c.model_format in {"jinen_v1", "zenz_v3_2"}:
-            prompt = (jinen_prompt(source, left_context, c.context_chars)
-                      if c.model_format == "jinen_v1"
-                      else zenz_prompt(source, left_context, right_context, c.context_chars))
+        if c.model_format in {"jinen_v1", "jinen_v2", "zenz_v3_2"}:
+            if c.model_format == "jinen_v2":
+                prompt = jinen_v2_prompt(source, left_context, c.context_chars)
+            elif c.model_format == "jinen_v1":
+                prompt = jinen_prompt(source, left_context, c.context_chars)
+            else:
+                prompt = zenz_prompt(source, left_context, right_context, c.context_chars)
             request = {"model": c.model, "prompt": prompt, "temperature": 0,
                        "repeat_penalty": 1.0, "max_tokens": c.max_tokens,
                        "stop": ["</s>"], "stream": False, "echo": False}
+            if c.model_format == "jinen_v2":
+                request["top_k"] = 1
             if c.backend == "llama_cpp":
                 self.load_model()
                 # Pass token IDs to avoid automatically inserting BOS/EOS.

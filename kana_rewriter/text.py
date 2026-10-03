@@ -94,3 +94,12 @@ def jinen_prompt(source: str, left: str = "", context_chars: int = 64) -> str:
     # jinen-v1 documents LEFT context only. Never send the zenz-v3.2 right marker.
     prompt = zenz_prompt(source, left, context_chars=context_chars)
     return prompt if prompt.startswith("\uee02") else "\uee02" + prompt
+
+
+def jinen_v2_prompt(source: str, left: str = "", context_chars: int = 64) -> str:
+    """Use v2's left-only protocol and normalize only the model input."""
+    prompt = unicodedata.normalize("NFKC", zenz_prompt(source, left, context_chars=context_chars))
+    # Normalization can turn full-width context into an EOS token.
+    if "</s>" in prompt:
+        raise ValueError("テキストにモデルの制御マーカーが含まれています")
+    return prompt

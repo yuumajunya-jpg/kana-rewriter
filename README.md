@@ -90,14 +90,24 @@ K・J・`--text`では、専用モデルに渡せる連続したかなの部分�
 
 ```text
 jinen_v1:   \uEE02左文脈\uEE00カタカナの読み\uEE01
+jinen_v2:   \uEE02左文脈\uEE00カタカナの読み\uEE01（全体をNFKC正規化）
 zenz_v3_2:  \uEE02左文脈\uEE07右文脈\uEE00カタカナの読み\uEE01
 ```
 
 空文脈の扱いも形式に合わせます。余分なBOS/EOSを追加せず、temperature=0、反復ペナルティなしで生成します。EOS/`</s>`で停止し、打ち切り・空出力・制御マーカー・空白や改行を含む結果は拒否します。
 
+jinen v2を使う場合は、ダウンロード後に`config.toml`の以下の2項目を変更して再起動します。smallとxsmall、各GGUF量子化版で同じ形式を使えます。
+
+```toml
+model_path = "models/jinen-v2-small-Q5_K_M.gguf"
+model_format = "jinen_v2"
+```
+
+v2は左文脈が空なら`\uEE02`を省略し、組み立てたプロンプト全体をNFKC正規化して、temperature=0・top_k=1で生成します。正規化するのはモデル入力だけで、元の本文の英数字・記号・対象外の文字は保持します。v1の入力形式は変更しません。仕様は[作者のモデルカード](https://huggingface.co/togatogah/jinen-v2-small.gguf)に従っています。
+
 `config.example.toml`が設定例です。`--config`を省略すると既定値を使用し、`config.toml`は自動読み込みしません。
 
-- `model_format`: `jinen_v1`、`zenz_v3_2`、汎用モデル用の`chat`。
+- `model_format`: `jinen_v1`、`jinen_v2`、`zenz_v3_2`、汎用モデル用の`chat`。
 - `model_path`: 設定ファイルからの相対パス、または絶対パス。
 - `n_ctx = 0`: GGUFの学習時コンテキスト長を使用。
 - `context_chars`: 文脈の最大文字数。0で文脈を無効化。
