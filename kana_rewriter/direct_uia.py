@@ -117,7 +117,14 @@ class AutomationEditor:
             logger.debug("IME判定: TextEditPattern非対応 / 未確定状態は検出できません")
 
     def get_text(self, range_):
-        text = normalize(range_.GetText(self.limit * 2 + 1))
+        # Empty BSTRs can arrive as None. At document/line starts we also use
+        # collapsed ranges to measure prefixes and construct insertion points.
+        if range_.CompareEndpoints(0, range_, 1) == 0:
+            return ""
+        raw = range_.GetText(self.limit * 2 + 1)
+        if raw is None:
+            raise SnapshotPending("空ではないUIA文字範囲の本文を取得できません")
+        text = normalize(raw)
         if len(text) > self.limit:
             raise RuntimeError("入力欄の本文がmax_document_charsを超えています")
         return text
@@ -236,9 +243,50 @@ class AutomationEditor:
         begin = self.point(document, state.text, start)
         finish = self.point(document, state.text, end)
         begin.MoveEndpointByRange(1, finish, 1)
-        if self.get_text(begin) != state.text[start:end]:
-            raise RuntimeError("UIAの置換対象範囲を確認できませんでした")
-        return begin
+        if self.range_matches(document, begin, state.text, start, end):
+            return begin
+        logger.debug("UIA範囲再構築: 要求=%s:%s / 要求文字=%r / 実際文字=%r",
+                     start, end, state.text[start:end], self.get_text(begin))
+        # Paragraph boundaries may have distinct provider anchors with the same
+        # prefix text. Collapsing the left prefix can retain the preceding blank
+        # paragraph's anchor. Build backwards from the right endpoint instead;
+        # never trim the returned text or select an unverified range.
+        anchors = [finish]
+        if end == state.end:
+            live = self.selection().Clone()
+            live.MoveEndpointByRange(0, live, 1)
+            anchors.append(live)
+        for anchor in anchors:
+            candidate = anchor.Clone()
+            candidate.MoveEndpointByUnit(0, 0, start - end)
+            for _ in range(8):
+                if self.range_matches(document, candidate, state.text, start, end):
+                    logger.debug("UIA範囲再構築: 末尾からの移動で一致=%s:%s", start, end)
+                    return candidate
+                prefix = document.Clone()
+                prefix.MoveEndpointByRange(1, candidate, 0)
+                left = self.get_text(prefix)
+                if not state.text.startswith(left):
+                    break
+                delta = start - len(left)
+                if not delta or not candidate.MoveEndpointByUnit(0, 0, delta):
+                    break
+        raise RuntimeError(f"UIAの置換対象範囲を確認できませんでした（要求{start}:{end}）。"
+                           "文字は送信していません。--debugで範囲の診断を確認できます")
+
+    def range_matches(self, document, range_, text, start, end):
+        if self.get_text(range_) != text[start:end]:
+            return False
+        prefix = document.Clone()
+        prefix.MoveEndpointByRange(1, range_, 0)
+        if self.get_text(prefix) != text[:start]:
+            return False
+        prefix.MoveEndpointByRange(1, range_, 1)
+        if self.get_text(prefix) != text[:end]:
+            return False
+        if self.get_text(self.pattern.DocumentRange) != text:
+            raise RuntimeError("文字範囲の準備中に本文が変更されました")
+        return True
 
     def replace(self, state, start, end, result, expected_tick=None):
         before_tick = input_tick() if expected_tick is None else expected_tick
@@ -246,6 +294,8 @@ class AutomationEditor:
         self.check_focus()
         self.check_writable()
         check_input_ready(self.window[1])
+        if self.read() != state:
+            raise RuntimeError("置換直前に本文または選択位置が変わりました")
         selected = self.range_for(state, start, end)
         if input_tick() != before_tick:
             raise RuntimeError("文字範囲の準備中に操作がありました")

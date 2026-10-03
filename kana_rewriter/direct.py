@@ -49,8 +49,12 @@ class EditorEngine:
                      state.text[max(0, state.start - 80):state.start],
                      state.text[state.start:min(state.end, state.start + 80)],
                      state.text[state.end:state.end + 80])
-        if window_identity() != target or input_tick() != tick:
-            raise RuntimeError("本文の取得中に操作があったため中止しました")
+        # Pointer motion and releases are excluded by the activity monitor.
+        # Re-read on editing input to verify the captured state.
+        if input_tick() != tick and editor.read() != state:
+            raise RuntimeError("本文の取得中に本文または選択位置が変わったため中止しました")
+        if window_identity() != target:
+            raise RuntimeError("本文の取得中に入力先が変わったため中止しました")
         self.counter += 1
         try:
             capture = make_capture(state, (target, tick), mode, self.config, self.counter)
@@ -84,11 +88,14 @@ class EditorEngine:
             raise RuntimeError("取得した編集対象が無効になっています")
         saved, editor, state = self.saved
         self.saved = None  # an edit token is consumed even on failure; never replay
-        target, tick = capture.stamp
-        if window_identity() != target or input_tick() != tick:
-            raise RuntimeError("待機中に操作または入力先変更があったため中止しました")
+        target, _ = capture.stamp
+        if window_identity() != target:
+            raise RuntimeError("待機中に入力先が変わったため中止しました")
         if editor.read() != state:
             raise RuntimeError("待機中に本文または選択位置が変わったため中止しました")
+        # Activity during inference is harmless when the editor state is still
+        # identical. Keep a fresh activity guard for the short mutation phase.
+        tick = input_tick()
         start, end, expected, caret = replacement_plan(capture, result)
         if not result or "\x00" in result or len(expected) > self.config.max_document_chars:
             raise ValueError("差し替え結果が空、不正、または本文上限を超えています")
@@ -169,6 +176,8 @@ def _worker(connection, config, debug):
     except (EOFError, BrokenPipeError):
         pass
     finally:
+        from .input_activity import close_monitor
+        close_monitor()
         connection.close()
 
 

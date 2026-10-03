@@ -88,13 +88,30 @@ class EngineTests(unittest.TestCase):
         return engine, editor, state, capture
 
     def test_replace_only_target_and_restore_caret(self):
+        from kana_rewriter.input_activity import InputActivity
+        activity = InputActivity()
+        activity.counter = 10
+
+        def moving_pointer():
+            activity._mouse(0, 0x0200, 0)
+            return activity.counter
+
         engine, editor, state, capture = self.prepare()
         editor.read.side_effect = [state, TextState("散歩。あと", 2, 2), TextState("散歩。あと", 3, 3)]
         with patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
-                patch("kana_rewriter.direct_win32.input_tick", return_value=10):
+                patch("kana_rewriter.input_activity.user.CallNextHookEx", return_value=0), \
+                patch("kana_rewriter.direct_win32.input_tick", side_effect=moving_pointer):
             self.assertTrue(engine.apply(capture, "散歩"))
         editor.replace.assert_called_once_with(state, 0, 3, "散歩", expected_tick=10)
         editor.restore_caret.assert_called_once_with(TextState("散歩。あと", 2, 2), 3, expected_tick=10)
+
+    def test_held_mouse_button_blocks_dragging_even_without_a_new_click(self):
+        from kana_rewriter import direct_win32 as win
+        for key in (0x01, 0x02, 0x04, 0x05, 0x06):
+            with self.subTest(key=key), patch.object(
+                    win.user, "GetAsyncKeyState", side_effect=lambda k: 0x8000 if k == key else 0):
+                with self.assertRaisesRegex(RuntimeError, "マウスボタン"):
+                    win.check_input_ready(999)
 
     def test_uia_waits_for_caret_even_when_text_is_already_updated(self):
         engine, editor, state, capture = self.prepare()
@@ -107,17 +124,51 @@ class EngineTests(unittest.TestCase):
         editor.replace.assert_called_once()
         self.assertEqual(editor.read.call_count, 4)
 
-    def test_input_or_document_changes_cancel_and_consume_token(self):
-        for tick, state_changed in [(11, False), (10, True)]:
+    def test_document_selection_or_focus_changes_cancel_and_consume_token(self):
+        for target, changed in [((1, 2, 3), TextState("変更", 0, 0)),
+                                ((1, 2, 3), TextState("さんぽ。あと", 2, 2)),
+                                ((4, 5, 6), None)]:
             engine, editor, state, capture = self.prepare()
-            editor.read.return_value = TextState("変更", 0, 0) if state_changed else state
-            with patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
-                    patch("kana_rewriter.direct_win32.input_tick", return_value=tick):
+            editor.read.return_value = changed or state
+            with patch("kana_rewriter.direct_win32.window_identity", return_value=target), \
+                    patch("kana_rewriter.direct_win32.input_tick", return_value=11):
                 with self.assertRaises(RuntimeError):
                     engine.apply(capture, "散歩")
                 with self.assertRaises(RuntimeError):
                     engine.apply(capture, "散歩")
             editor.replace.assert_not_called()
+
+    def test_activity_during_inference_with_unchanged_state_is_allowed(self):
+        engine, editor, state, capture = self.prepare()
+        editor.read.side_effect = [state, TextState("散歩。あと", 2, 2), TextState("散歩。あと", 3, 3)]
+        with patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
+                patch("kana_rewriter.direct_win32.input_tick", return_value=99):
+            self.assertTrue(engine.apply(capture, "散歩"))
+        editor.replace.assert_called_once_with(state, 0, 3, "散歩", expected_tick=99)
+
+    def test_capture_activity_checks_actual_state_and_focus(self):
+        from kana_rewriter.direct import EditorEngine
+        state = TextState("さんぽ", 3, 3)
+        for changed, target, allowed in [(state, (1, 2, 3), True),
+                                        (TextState("さんぽ！", 4, 4), (1, 2, 3), False),
+                                        (TextState("さんぽ", 0, 0), (1, 2, 3), False),
+                                        (state, (4, 5, 6), False)]:
+            with self.subTest(changed=changed, target=target):
+                engine = EditorEngine(Config())
+                editor = Mock(kind="uia")
+                editor.read.side_effect = [state, changed]
+                with patch.object(engine, "editor", return_value=editor), \
+                        patch("kana_rewriter.winapi.user.GetAsyncKeyState", return_value=0), \
+                        patch("kana_rewriter.direct_win32.check_input_ready"), \
+                        patch("kana_rewriter.direct_win32.input_tick", side_effect=[10, 11]), \
+                        patch("kana_rewriter.direct_win32.window_identity",
+                              side_effect=[(1, 2, 3), (1, 2, 3), target]):
+                    if allowed:
+                        self.assertEqual(engine.capture("line", 1000).source, "さんぽ")
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            engine.capture("line", 1000)
+                        self.assertIsNone(engine.saved)
 
     def test_failed_readback_never_replays_or_moves_caret(self):
         engine, editor, state, capture = self.prepare()
@@ -163,8 +214,17 @@ def native_fixture(connection, rich):
 class NativeIntegrationTests(unittest.TestCase):
     @patch("kana_rewriter.direct_win32.input_tick", return_value=10)
     @patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3))
-    def test_cross_process_edit_and_rich_edit_multiline_unicode_undo(self, *_):
+    def test_cross_process_edit_and_rich_edit_multiline_unicode_undo(self, identity, tick):
         from kana_rewriter.direct_win32 import NativeEditor
+        from kana_rewriter.input_activity import InputActivity, user
+        activity = InputActivity()
+
+        def moving_pointer():
+            with patch.object(user, "CallNextHookEx", return_value=0):
+                activity._mouse(0, 0x0200, 0)
+            return activity.counter
+
+        tick.side_effect = moving_pointer
         for rich in (False, True):
             with self.subTest(rich=rich):
                 context = multiprocessing.get_context("spawn")
@@ -256,8 +316,156 @@ class Range:
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class UiaRangeTests(unittest.TestCase):
+    def test_blank_line_boundary_with_different_collapsed_range_anchor(self):
+        # A provider can expose the same prefix at two paragraph anchors.
+        # Collapsing a prefix at the next line start retains the blank-line
+        # anchor, which contributes an extra newline when extended to the right.
+        class ParagraphRange(Range):
+            def __init__(self, model, start=0, end=None, blank_anchor=False):
+                super().__init__(model, start, end)
+                self.blank_anchor = blank_anchor
+
+            def Clone(self):
+                return ParagraphRange(self.model, self.start, self.end, self.blank_anchor)
+
+            def MoveEndpointByRange(self, endpoint, other, other_endpoint):
+                collapsing_prefix = endpoint == 0 and other is self and other_endpoint == 1
+                super().MoveEndpointByRange(endpoint, other, other_endpoint)
+                if collapsing_prefix and self.start == self.model.line_start:
+                    self.blank_anchor = True
+
+            def GetText(self, limit):
+                text = super().GetText(limit)
+                return ("\n" + text)[:limit] if self.blank_anchor and text else text
+
+        for prefix, source in ((prefix, source)
+                               for prefix in ("\n", "\n\n", "前😀\n\n", "前\n\n\n")
+                               for source in ("さんぽ", "e\u0301さんぽ", "😀さんぽ")):
+            with self.subTest(prefix=prefix, source=source):
+                editor, model = self.prepare()
+                model.text = prefix + source + "。後ろ"
+                model.line_start = len(prefix)
+                model.boundaries = [i for i in range(len(model.text) + 1)
+                                    if i == len(model.text) or model.text[i] != "\u0301"]
+                end = len(prefix) + len(source)
+                model.selected = ParagraphRange(model, end, end)
+                editor.pattern.DocumentRange = ParagraphRange(model)
+                state = editor.read()
+                with patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                        patch("kana_rewriter.direct_uia.check_input_ready"), \
+                        patch("kana_rewriter.direct_uia.send") as send:
+                    editor.replace(state, len(prefix), end, "散歩")
+                self.assertEqual(editor.get_text(model.selected), source)
+                self.assertEqual((model.selected.start, model.selected.end),
+                                 (len(prefix), end))
+                send.assert_called_once()
+
+    def test_matching_text_at_wrong_position_is_rejected(self):
+        editor, model = self.prepare()
+        model.text = "さんぽ\n\nさんぽ"
+        document = Range(model)
+        self.assertFalse(editor.range_matches(document, Range(model, 0, 3), model.text, 5, 8))
+
+    def test_unverifiable_blank_line_range_never_selects_or_sends(self):
+        editor, model = self.prepare()
+        model.text = "前\n\nさんぽ"
+        model.boundaries = list(range(len(model.text) + 1))
+        model.selected = Range(model, 6, 6)
+        editor.pattern.DocumentRange = Range(model)
+        state = editor.read()
+        get_text = editor.get_text
+
+        def inconsistent_text(range_):
+            text = get_text(range_)
+            return "\n" + text if (range_.start, range_.end) == (3, 6) else text
+
+        with patch.object(editor, "get_text", side_effect=inconsistent_text), \
+                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send") as send:
+            with self.assertRaisesRegex(RuntimeError, "置換対象範囲"):
+                editor.replace(state, 3, 6, "散歩")
+        self.assertEqual((model.selected.start, model.selected.end), (6, 6))
+        send.assert_not_called()
+
+    def test_line_start_conversion_with_null_bstr_for_empty_ranges(self):
+        from kana_rewriter.direct import EditorEngine
+
+        class NullEmptyRange(Range):
+            def Clone(self):
+                return NullEmptyRange(self.model, self.start, self.end)
+
+            def GetText(self, limit):
+                return super().GetText(limit) or None
+
+        for prefix in ("", "前の行\n", "前😀\n\n"):
+            for mode in ("line", "selection"):
+                with self.subTest(prefix=prefix, mode=mode):
+                    editor, model = self.prepare()
+                    model.text = prefix + "さんぽ"
+                    model.boundaries = list(range(len(model.text) + 1))
+                    model.selected = NullEmptyRange(model, len(prefix) if mode == "selection"
+                                                    else len(model.text), len(model.text))
+
+                    class Pattern:
+                        @property
+                        def DocumentRange(self):
+                            return NullEmptyRange(model)
+
+                    editor.pattern = Pattern()
+                    engine = EditorEngine(Config())
+
+                    def deliver(events):
+                        self.assertEqual((model.selected.start, model.selected.end),
+                                         (len(prefix), len(prefix) + 3))
+                        model.text = prefix + "散歩"
+                        model.selected = NullEmptyRange(model, len(model.text), len(model.text))
+
+                    with patch.object(engine, "editor", return_value=editor), \
+                            patch("kana_rewriter.winapi.user.GetAsyncKeyState", return_value=0), \
+                            patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
+                            patch("kana_rewriter.direct_win32.input_tick", return_value=10), \
+                            patch("kana_rewriter.direct_win32.check_input_ready"), \
+                            patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                            patch("kana_rewriter.direct_uia.check_input_ready"), \
+                            patch("kana_rewriter.direct_uia.send", side_effect=deliver) as send:
+                        capture = engine.capture(mode, 1000)
+                        self.assertEqual(capture.source, "さんぽ")
+                        self.assertTrue(engine.apply(capture, "散歩"))
+                    self.assertEqual(model.text, prefix + "散歩")
+                    send.assert_called_once()
+
+    def test_null_text_for_nonempty_range_is_not_accepted(self):
+        from kana_rewriter.direct_uia import SnapshotPending
+        editor, model = self.prepare()
+        range_ = Range(model)
+        range_.GetText = Mock(return_value=None)
+        with self.assertRaises(SnapshotPending):
+            editor.get_text(range_)
+
+    def test_state_change_before_selection_does_not_send_or_select(self):
+        editor, model = self.prepare()
+        state = editor.read()
+        model.selected = Range(model, 0, 0)
+        with patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send") as send:
+            with self.assertRaisesRegex(RuntimeError, "置換直前"):
+                editor.replace(state, 5, 8, "散歩")
+        self.assertEqual((model.selected.start, model.selected.end), (0, 0))
+        send.assert_not_called()
+
     def test_full_normal_conversion_with_live_uia_ranges_and_async_input(self):
         from kana_rewriter.direct import EditorEngine
+        from kana_rewriter.input_activity import InputActivity
+        activity = InputActivity()
+
+        def moving_pointer():
+            # Exercise every engine/backend guard with mouse motion, including
+            # selection reflection and the IME switch immediately before send.
+            activity._mouse(0, 0x0200, 0)
+            return activity.counter
+
         editor, model = self.prepare()
         prefix = "文。\n" * 27 + "\n\n" + "今日はいい天気だ。"
         source, result = "さいきんあめつづきなので", "最近雨続きなので"
@@ -313,10 +521,11 @@ class UiaRangeTests(unittest.TestCase):
 
         with patch.object(engine, "editor", return_value=editor), \
                 patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
-                patch("kana_rewriter.direct_win32.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_win32.input_tick", side_effect=moving_pointer), \
                 patch("kana_rewriter.direct_win32.check_input_ready"), \
                 patch("kana_rewriter.winapi.user.GetAsyncKeyState", return_value=0), \
-                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.input_activity.user.CallNextHookEx", return_value=0), \
+                patch("kana_rewriter.direct_uia.input_tick", side_effect=moving_pointer), \
                 patch("kana_rewriter.direct_uia.check_input_ready"), \
                 patch("kana_rewriter.direct_uia.send", side_effect=deliver_unicode_input) as send:
             capture = engine.capture("line", 1000)
@@ -575,6 +784,30 @@ class UiaRangeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 editor.replace(state, 5, 8, "散歩")
         send.assert_not_called()
+
+    def test_click_wheel_or_key_during_select_still_blocks_input(self):
+        from kana_rewriter.input_activity import InputActivity, user
+        for kind, message in (("mouse", 0x0201), ("mouse", 0x020A), ("keyboard", 0x0100)):
+            with self.subTest(kind=kind, message=message):
+                editor, model = self.prepare()
+                state = editor.read()
+                activity = InputActivity()
+                selected = editor.range_for(state, 5, 8)
+
+                def select_and_interact():
+                    model.selected = selected.Clone()
+                    getattr(activity, "_" + kind)(0, message, 0)
+                    activity._mouse(0, 0x0200, 0)
+
+                selected.Select = select_and_interact
+                with patch.object(editor, "range_for", return_value=selected), \
+                        patch.object(user, "CallNextHookEx", return_value=0), \
+                        patch("kana_rewriter.direct_uia.input_tick", side_effect=lambda: activity.counter), \
+                        patch("kana_rewriter.direct_uia.check_input_ready"), \
+                        patch("kana_rewriter.direct_uia.send") as send:
+                    with self.assertRaisesRegex(RuntimeError, "選択の反映待ち"):
+                        editor.replace(state, 5, 8, "散歩")
+                send.assert_not_called()
 
     def test_tab_rejected_before_selection(self):
         editor, model = self.prepare()

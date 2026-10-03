@@ -4,7 +4,8 @@ import logging
 from ctypes import wintypes as W
 
 from .editor import TextState, python_offset, utf16_length
-from .winapi import user, focus, LastInput, KeyboardInput, send
+from .winapi import user, focus, KeyboardInput, send
+from .input_activity import input_tick
 
 logger = logging.getLogger(__name__)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -22,13 +23,6 @@ imm.ImmGetContext.restype = W.HANDLE
 imm.ImmGetCompositionStringW.argtypes = [W.HANDLE, W.DWORD, C.c_void_p, W.DWORD]
 imm.ImmGetCompositionStringW.restype = C.c_long
 imm.ImmReleaseContext.argtypes = [W.HWND, W.HANDLE]
-
-
-def input_tick():
-    info = LastInput(C.sizeof(LastInput), 0)
-    if not user.GetLastInputInfo(C.byref(info)):
-        raise C.WinError(C.get_last_error())
-    return info.tick
 
 
 def window_identity():
@@ -52,6 +46,8 @@ def is_standard_edit(hwnd):
 def check_input_ready(hwnd):
     if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
         raise RuntimeError("修飾キーが押されているため中止しました")
+    if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x01, 0x02, 0x04, 0x05, 0x06)):
+        raise RuntimeError("マウスボタンが押されているため中止しました")
     # IMM is a thread-owned input context, not an authoritative composition
     # query for an external editor. For external controls TextEditPattern is
     # checked by the UIA backend when available.
@@ -139,6 +135,8 @@ class NativeEditor:
         if window_identity() != self.window or input_tick() != tick:
             raise RuntimeError("入力先または操作状態が変わりました")
         check_input_ready(self.hwnd)
+        if self.read() != state:
+            raise RuntimeError("置換直前に本文または選択位置が変わりました")
         self.select(state, start, end)
         selected = self.read()
         if selected != TextState(state.text, start, end):

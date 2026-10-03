@@ -1,4 +1,4 @@
-"""Small Win32 adapter; no keyboard hook, admin rights or third-party packages."""
+"""Small Win32 adapter; no admin rights or third-party packages required."""
 import ctypes as C
 from ctypes import wintypes as W
 
