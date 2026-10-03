@@ -2,12 +2,14 @@
 import ctypes as C
 from ctypes import wintypes as W
 import time
+import logging
 
 from .core import Capture
 from .text import split_at_caret
-from .clipboard import Clipboard, pump_sent_messages
+from .clipboard import Clipboard, ClipboardWriteError, pump_sent_messages
 
 user = C.WinDLL("user32", use_last_error=True)
+logger = logging.getLogger(__name__)
 
 
 class KeyboardInput(C.Structure):
@@ -50,6 +52,10 @@ user.GetClipboardSequenceNumber.restype = W.DWORD
 user.RegisterHotKey.argtypes = [W.HWND, C.c_int, W.UINT, W.UINT]
 user.UnregisterHotKey.argtypes = [W.HWND, C.c_int]
 user.PeekMessageW.argtypes = [C.POINTER(W.MSG), W.HWND, W.UINT, W.UINT, W.UINT]
+user.GetClassNameW.argtypes = [W.HWND, W.LPWSTR, C.c_int]
+user.SendMessageTimeoutW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM,
+                                    W.UINT, W.UINT, C.POINTER(C.c_size_t)]
+user.SendMessageTimeoutW.restype = W.LPARAM
 
 
 def send(events):
@@ -74,8 +80,9 @@ def focus():
 
 
 class Desktop:
-    def __init__(self):
+    def __init__(self, paste_wait_seconds=0.5):
         self.clipboard = None
+        self.paste_wait_seconds = paste_wait_seconds
 
     def close(self):
         if self.clipboard is not None:
@@ -147,19 +154,92 @@ class Desktop:
             raise ValueError("対象が空、または文字数上限を超えています")
         if len(text) > 10000:
             raise ValueError("取得した行が長すぎます。選択範囲モードを使用してください")
-        return Capture(text, self.stamp(), region)
+        logger.debug("取得文字列=%r / 対象=%r / 左文脈=%r / 右文脈=%r",
+                     text, source, region.left if region else "", region.right if region else "")
+        return Capture(text, self.stamp(), region, len(before) if region is not None else None)
 
-    def replace(self, text, target):
+    def replace(self, text, target, caret=None):
+        if caret is not None and (not 0 <= caret <= len(text) or "\n" in text or "\r" in text):
+            raise ValueError("カーソル復元は単一の表示行に限ります")
         if focus() != target:
             raise RuntimeError("入力先が変わりました")
         if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
             raise RuntimeError("修飾キーが押されているため中止しました")
-        data = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-16-le")
-        events = []
-        for i in range(0, len(data), 2):
-            unit = int.from_bytes(data[i:i + 2], "little")
-            if unit == 10:
-                unit = 13  # Text controls expect carriage returns for line breaks.
-            # Unicode input replaces the selection without touching the clipboard.
-            events.extend([KeyboardInput(0, unit, 4, 0, 0), KeyboardInput(0, unit, 6, 0, 0)])
-        send(events)
+        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+        if self.clipboard is None:
+            self.clipboard = Clipboard()
+        saved = self.clipboard.snapshot()
+        owned = None
+        timed_out = False
+        try:
+            try:
+                owned = self.clipboard.write_text(text, saved.sequence)
+            except ClipboardWriteError as exc:
+                owned = exc.sequence
+                raise
+            if focus() != target:
+                raise RuntimeError("貼り付け準備中に入力先が変わりました")
+            if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
+                raise RuntimeError("貼り付け準備中に修飾キーが押されたため中止しました")
+            current = user.GetClipboardSequenceNumber()
+            if current != owned:
+                logger.debug("クリップボード番号変化=%s→%s / 所有者と文字列を再確認", owned, current)
+                owned = self.clipboard.confirm_text(text)
+            # The completed string is already on the clipboard. Never send its
+            # characters as VK_PACKET events: the editor/IME may process those
+            # individually and change its caret/composition state between them.
+            name = C.create_unicode_buffer(256)
+            if target[1]:
+                user.GetClassNameW(target[1], name, len(name))
+            class_name = name.value.lower()
+            if class_name == "edit" or class_name.startswith("richedit"):
+                logger.debug("貼り付け方法=同期WM_PASTE / 入力欄=%s", name.value)
+                result = C.c_size_t()
+                selection_start = W.DWORD()
+                selection_end = W.DWORD()
+                if caret is not None:
+                    if not user.SendMessageTimeoutW(target[1], 0x00B0,
+                            C.addressof(selection_start), C.addressof(selection_end),
+                            0x23, 2000, C.byref(result)):
+                        raise RuntimeError("カーソル復元用の選択位置を取得できませんでした")
+                # A standard text control finishes WM_PASTE before returning,
+                # so restoring the clipboard cannot race its paste request.
+                if not user.SendMessageTimeoutW(target[1], 0x0302, 0, 0, 0x23, 2000, C.byref(result)):
+                    # A timed-out target may still process the message later.
+                    # Keep the intended payload, never retry a potentially
+                    # completed edit or replace it with the old clipboard data.
+                    timed_out = True
+                    raise RuntimeError("入力欄の貼り付け応答を確認できませんでした。結果はクリップボードに保持しています")
+                if caret is not None:
+                    position = selection_start.value + len(text[:caret].encode("utf-16-le")) // 2
+                    if not user.SendMessageTimeoutW(target[1], 0x00B1, position, position,
+                                                    0x23, 2000, C.byref(result)):
+                        raise RuntimeError("貼り付け後のカーソル位置を復元できませんでした")
+            else:
+                logger.debug("貼り付け方法=Ctrl+V / 復元待機=%.2f秒 / 入力欄=%s",
+                             self.paste_wait_seconds, name.value or "不明")
+                chord(0x11, 0x56)
+                # Custom/browser controls don't expose a synchronous paste API.
+                # Leave the payload available while their queued paste runs.
+                deadline = time.monotonic() + self.paste_wait_seconds
+                while time.monotonic() < deadline:
+                    pump_sent_messages()
+                    time.sleep(0.01)
+                if caret is not None:
+                    # End anchors the caret even if a custom editor retained
+                    # the start of the selection after pasting. Visible-line
+                    # navigation is the same contract as capture's Home/End.
+                    if focus()[:2] != target[:2]:
+                        raise RuntimeError("貼り付け後に入力先が変わったためカーソル復元を中止しました")
+                    if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
+                        raise RuntimeError("修飾キーが押されているためカーソル復元を中止しました")
+                    chord(0x23)  # End, then return across the unchanged suffix.
+                    for _ in text[caret:]:
+                        chord(0x25)
+                logger.debug("貼り付け後のカーソル復元位置=%s", caret)
+        finally:
+            try:
+                if owned is not None and not timed_out:
+                    self.clipboard.restore(saved, owned)
+            finally:
+                saved.release()

@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 import json
 import os
+import logging
 from pathlib import Path
 import tomllib
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
-from .text import TextRegion, zenz_prompt, jinen_prompt, MARKERS
+from .text import TextRegion, zenz_prompt, jinen_prompt, MARKERS, reading_spans
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class Config:
     timeout_seconds: float = 30
     max_chars: int = 1000
     max_tokens: int = 256
+    paste_wait_seconds: float = 0.1
     api_key_env: str = "KANA_REWRITER_API_KEY"
 
     def __post_init__(self):
@@ -42,6 +45,8 @@ class Config:
             raise ValueError("model、timeout_secondsの設定が不正です")
         if not 1 <= self.max_chars <= 10000 or not 1 <= self.max_tokens <= 32768:
             raise ValueError("max_chars、max_tokensの設定が不正です")
+        if not 0.1 <= self.paste_wait_seconds <= 5:
+            raise ValueError("paste_wait_secondsは0.1〜5秒です")
 
     @classmethod
     def load(cls, path: str):
@@ -137,6 +142,26 @@ class Converter:
                 raise ValueError("AIが改行・タブを変更したため中止しました")
         return result
 
+    def convert_selection(self, source: str, left_context: str = "", right_context: str = "") -> str:
+        """Convert kana spans, retaining punctuation/kanji/whitespace verbatim."""
+        if not source.strip() or len(source) > self.config.max_chars:
+            raise ValueError("対象が空、または文字数上限を超えています")
+        if self.config.model_format == "chat":
+            return self.convert(source, left_context, right_context)
+        parts = []
+        position = 0
+        for start, end in reading_spans(source):
+            parts.append(source[position:start])
+            logger.debug("選択範囲内のかな対象=%r", source[start:end])
+            converted = self.convert(source[start:end], left_context + "".join(parts),
+                                     source[end:] + right_context)
+            parts.append(converted)
+            position = end
+        parts.append(source[position:])
+        result = "".join(parts)
+        logger.debug("選択範囲の変換結果=%r", result)
+        return result
+
     def _http(self, request):
         c = self.config
         body = json.dumps(request).encode("utf-8")
@@ -169,6 +194,7 @@ class Converter:
                 or any(marker in result for marker in MARKERS)):
             raise ValueError("AIの出力を安全に差し替えられません")
         # Do not strip whitespace: leading/trailing whitespace belongs to the user.
+        logger.debug("モデル出力=%r", result)
         return result
 
 
@@ -177,6 +203,7 @@ class Capture:
     text: str
     stamp: object
     region: TextRegion | None = None
+    caret: int | None = None
 
     @property
     def source(self):
@@ -201,5 +228,12 @@ def apply_result(backend, capture: Capture, result: str) -> bool:
         raise RuntimeError("選択範囲の内容が変わったため中止しました")
     # copy_selection checks focus while copying; replacement checks it again.
     replacement = capture.region.rebuild(result) if capture.region is not None else result
-    backend.replace(replacement, capture.stamp[0])
+    logger.debug("差し替え前=%r / 完成した差し替え文字列=%r", capture.text, replacement)
+    if capture.region is not None:
+        region = capture.region
+        original_caret = capture.caret if capture.caret is not None else len(region.left + region.target)
+        caret = original_caret + len(result) - len(region.target)
+        backend.replace(replacement, capture.stamp[0], caret=caret)
+    else:
+        backend.replace(replacement, capture.stamp[0])
     return True

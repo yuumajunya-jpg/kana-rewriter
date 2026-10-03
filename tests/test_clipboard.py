@@ -6,6 +6,82 @@ from unittest.mock import Mock, patch, call
 
 @unittest.skipUnless(sys.platform == "win32", "Windows clipboard only")
 class ClipboardTests(unittest.TestCase):
+    def test_write_publishes_complete_utf16_text_and_transfers_memory(self):
+        from kana_rewriter import clipboard as cb
+        instance = self.clipboard()
+        payload = "今日はいい天気だ。散歩😀\r\n"
+        transferred = []
+        state = {"sequence": 10}
+
+        def close():
+            if transferred:
+                state["sequence"] = 14  # format synthesis on CloseClipboard
+            return 1
+
+        def publish(fmt, handle):
+            pointer = cb.kernel.GlobalLock(handle)
+            try:
+                self.assertEqual(C.string_at(pointer, len(payload.encode('utf-16-le')) + 2),
+                                 payload.encode('utf-16-le') + b'\x00\x00')
+            finally:
+                cb.kernel.GlobalUnlock(handle)
+            transferred.append(handle)
+            state["sequence"] = 11
+            return handle
+
+        try:
+            with patch.object(cb.user, "OpenClipboard", return_value=1), \
+                    patch.object(cb.user, "CloseClipboard", side_effect=close), \
+                    patch.object(cb.user, "GetClipboardSequenceNumber", side_effect=lambda: state["sequence"]), \
+                    patch.object(cb.user, "GetClipboardOwner", return_value=123), \
+                    patch.object(cb.user, "GetClipboardData", side_effect=lambda fmt: transferred[0]), \
+                    patch.object(cb.user, "EmptyClipboard", return_value=1), \
+                    patch.object(cb.user, "SetClipboardData", side_effect=publish) as put:
+                self.assertEqual(instance.write_text(payload, 10), 14)
+                put.assert_called_once()
+        finally:
+            for handle in transferred:
+                cb.kernel.GlobalFree(handle)  # mock clipboard never owned it
+
+    def test_confirm_rejects_changed_owner_or_text(self):
+        from kana_rewriter import clipboard as cb
+        instance = self.clipboard()
+        buffer = C.create_unicode_buffer("別の内容")
+        for owner in (999, 123):
+            with self.subTest(owner=owner), \
+                    patch.object(cb.user, "OpenClipboard", return_value=1), \
+                    patch.object(cb.user, "CloseClipboard", return_value=1), \
+                    patch.object(cb.user, "GetClipboardOwner", return_value=owner), \
+                    patch.object(cb.user, "GetClipboardData", return_value=101), \
+                    patch.object(cb.kernel, "GlobalLock", return_value=C.addressof(buffer)), \
+                    patch.object(cb.kernel, "GlobalUnlock"):
+                with self.assertRaisesRegex(RuntimeError, "変わった"):
+                    instance.confirm_text("完成文")
+
+    def test_write_does_not_empty_newer_clipboard(self):
+        from kana_rewriter import clipboard as cb
+        with patch.object(cb.user, "OpenClipboard", return_value=1), \
+                patch.object(cb.user, "CloseClipboard", return_value=1), \
+                patch.object(cb.user, "GetClipboardSequenceNumber", return_value=99), \
+                patch.object(cb.user, "EmptyClipboard") as empty:
+            with self.assertRaisesRegex(RuntimeError, "変更"):
+                self.clipboard().write_text("完成文", 10)
+            empty.assert_not_called()
+
+    def test_failed_publication_restores_backup_without_pasting(self):
+        from kana_rewriter import clipboard as cb, windows as win
+        desktop = win.Desktop()
+        desktop.clipboard = Mock()
+        desktop.clipboard.write_text.side_effect = cb.ClipboardWriteError(11)
+        with patch.object(win, "focus", return_value="target"), \
+                patch.object(win.user, "GetAsyncKeyState", return_value=0), \
+                patch.object(win, "chord") as chord:
+            with self.assertRaises(cb.ClipboardWriteError):
+                desktop.replace("完成文", "target")
+            chord.assert_not_called()
+        desktop.clipboard.restore.assert_called_once_with(desktop.clipboard.snapshot.return_value, 11)
+        desktop.clipboard.snapshot.return_value.release.assert_called_once()
+
     def test_native_duplicate_is_independent_of_original_memory(self):
         from ctypes import wintypes as W
         from kana_rewriter import clipboard as cb

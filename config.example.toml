@@ -17,5 +17,6 @@ model = "local"
 timeout_seconds = 30 # HTTPの場合のみ。直接推論の時間制限ではありません
 max_chars = 1000
 max_tokens = 256
+paste_wait_seconds = 0.5 # ブラウザー等へCtrl+Vを送った後のクリップボード復元待機
 # 認証が必要な場合、キーを格納した環境変数名を指定
 api_key_env = "KANA_REWRITER_API_KEY"

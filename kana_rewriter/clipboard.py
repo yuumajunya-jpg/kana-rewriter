@@ -23,6 +23,7 @@ user.GetClipboardData.restype = W.HANDLE
 user.SetClipboardData.argtypes = [W.UINT, W.HANDLE]
 user.SetClipboardData.restype = W.HANDLE
 user.GetClipboardSequenceNumber.restype = W.DWORD
+user.GetClipboardOwner.restype = W.HWND
 user.GetClipboardFormatNameW.argtypes = [W.UINT, W.LPWSTR, C.c_int]
 user.CreateWindowExW.argtypes = [W.DWORD, W.LPCWSTR, W.LPCWSTR, W.DWORD,
                                C.c_int, C.c_int, C.c_int, C.c_int,
@@ -35,6 +36,8 @@ kernel.GlobalLock.restype = C.c_void_p
 kernel.GlobalUnlock.argtypes = [W.HGLOBAL]
 kernel.GlobalFree.argtypes = [W.HGLOBAL]
 kernel.GlobalFree.restype = W.HGLOBAL
+kernel.GlobalAlloc.argtypes = [W.UINT, C.c_size_t]
+kernel.GlobalAlloc.restype = W.HGLOBAL
 ole.OleDuplicateData.argtypes = [W.HANDLE, W.WORD, W.UINT]
 ole.OleDuplicateData.restype = W.HANDLE
 gdi.DeleteObject.argtypes = [W.HANDLE]
@@ -82,6 +85,12 @@ class Snapshot:
         for fmt, handle in self.items:
             free_data(fmt, handle)
         self.items.clear()
+
+
+class ClipboardWriteError(RuntimeError):
+    def __init__(self, sequence):
+        super().__init__("貼り付け用テキストをクリップボードに置けませんでした")
+        self.sequence = sequence
 
 
 class Clipboard:
@@ -169,6 +178,56 @@ class Clipboard:
         finally:
             if not user.CloseClipboard():
                 raise RuntimeError("Win32クリップボードを閉じられませんでした")
+
+    def write_text(self, text, expected_sequence):
+        """Publish the entire replacement as one CF_UNICODETEXT payload."""
+        if "\x00" in text:
+            raise ValueError("貼り付け文字列にNUL文字が含まれています")
+        payload = text.encode("utf-16-le") + b"\x00\x00"
+        handle = kernel.GlobalAlloc(2, len(payload))
+        if not handle:
+            raise C.WinError(C.get_last_error())
+        try:
+            pointer = kernel.GlobalLock(handle)
+            if not pointer:
+                raise C.WinError(C.get_last_error())
+            try:
+                C.memmove(pointer, payload, len(payload))
+            finally:
+                kernel.GlobalUnlock(handle)
+            with self.opened():
+                if user.GetClipboardSequenceNumber() != expected_sequence:
+                    raise RuntimeError("貼り付け準備中にクリップボードが変更されたため中止しました")
+                if not user.EmptyClipboard():
+                    raise RuntimeError("貼り付け用クリップボードの初期化に失敗しました")
+                if not user.SetClipboardData(13, handle):
+                    # EmptyClipboard already changed the clipboard. Let the
+                    # caller restore its backup, still guarded by this sequence.
+                    raise ClipboardWriteError(user.GetClipboardSequenceNumber())
+                handle = None  # Windows owns the payload now.
+            # Closing publishes the update and may synthesize other formats.
+            # Query only after CloseClipboard has finished, not in a return
+            # expression inside the context manager (evaluated before close).
+            return self.confirm_text(text)
+        finally:
+            if handle:
+                kernel.GlobalFree(handle)
+
+    def confirm_text(self, expected_text):
+        """Accept format-only updates, but never a different owner or payload."""
+        with self.opened():
+            if user.GetClipboardOwner() != self.hwnd:
+                raise RuntimeError("貼り付け前にクリップボードの所有者が変わったため中止しました")
+            handle = user.GetClipboardData(13)
+            pointer = kernel.GlobalLock(handle) if handle else None
+            if not pointer:
+                raise RuntimeError("貼り付け用クリップボードの文字列を確認できませんでした")
+            try:
+                if C.wstring_at(pointer) != expected_text:
+                    raise RuntimeError("貼り付け前にクリップボードの文字列が変わったため中止しました")
+            finally:
+                kernel.GlobalUnlock(handle)
+            return user.GetClipboardSequenceNumber()
 
     def restore(self, saved, owned_sequence):
         with self.opened():

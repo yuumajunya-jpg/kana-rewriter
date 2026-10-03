@@ -4,10 +4,25 @@ import unicodedata
 
 
 MARKERS = tuple(chr(0xEE00 + i) for i in range(8))
+TRAILING_PUNCTUATION = "。、？！?!,.，．"
 
 
 def is_hiragana(character: str) -> bool:
     return "\u3041" <= character <= "\u3096" or character in "\u3099\u309a\u309d\u309eー"
+
+
+def reading_spans(text: str):
+    """Split a mixed selection into contiguous kana spans without morphology."""
+    start = None
+    for index, character in enumerate(text):
+        kana = is_hiragana(character) or "\u30a1" <= character <= "\u30fa" or character in "ヽヾ"
+        if kana and start is None:
+            start = index
+        elif not kana and start is not None:
+            yield start, index
+            start = None
+    if start is not None:
+        yield start, len(text)
 
 
 @dataclass(frozen=True)
@@ -21,19 +36,23 @@ class TextRegion:
 
 
 def split_at_caret(text: str, caret: int) -> TextRegion:
-    """Take the contiguous hiragana run immediately before the caret.
+    """Take the hiragana run before the caret, skipping trailing punctuation.
 
     Kanji, punctuation (including 。), whitespace, Latin letters and katakana
     stop the scan. No morphology or particle detection is attempted.
     """
     if not 0 <= caret <= len(text):
         raise ValueError("カーソル位置が文字列の範囲外です")
-    start = caret
+    # Keep punctuation verbatim in the right context, including runs such as ?!.
+    end = caret
+    while end > 0 and text[end - 1] in TRAILING_PUNCTUATION:
+        end -= 1
+    start = end
     while start > 0 and is_hiragana(text[start - 1]):
         start -= 1
-    if start == caret:
+    if start == end:
         raise ValueError("カーソル直前に変換対象のひらがながありません")
-    return TextRegion(text[:start], text[start:caret], text[caret:])
+    return TextRegion(text[:start], text[start:end], text[end:])
 
 
 def katakana_reading(text: str) -> str:

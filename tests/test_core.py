@@ -14,6 +14,45 @@ def response(text="今日は良い天気です", reason="stop"):
 
 
 class CoreTests(unittest.TestCase):
+    def test_mixed_selection_preserves_non_kana_and_passes_context(self):
+        client = Converter(Config())
+        with patch.object(client, "convert", side_effect=["歯医者", "廃車"]) as convert:
+            self.assertEqual(client.convert_selection("歯:はいしゃ\n車:ハイシャ!", "前", "後"),
+                             "歯:歯医者\n車:廃車!")
+        self.assertEqual(convert.call_args_list[0].args,
+                         ("はいしゃ", "前歯:", "\n車:ハイシャ!後"))
+        self.assertEqual(convert.call_args_list[1].args,
+                         ("ハイシャ", "前歯:歯医者\n車:", "!後"))
+
+    def test_selection_without_kana_does_not_call_model(self):
+        client = Converter(Config())
+        with patch.object(client, "convert") as convert:
+            self.assertEqual(client.convert_selection("今日。ABC 123\n"), "今日。ABC 123\n")
+            convert.assert_not_called()
+
+    def test_sentence_rebuild_keeps_existing_kanji_in_place(self):
+        from kana_rewriter.text import split_at_caret
+        source = "今日はいい天気だ。さんぽでもしようか"
+        desktop = Mock()
+        captured = Capture(source, ("window", 1, 2), split_at_caret(source, len(source)))
+        desktop.stamp.return_value = captured.stamp
+        desktop.copy_selection.return_value = source
+        self.assertEqual(captured.source, "さんぽでもしようか")
+        self.assertTrue(apply_result(desktop, captured, "散歩でもしようか"))
+        desktop.replace.assert_called_once_with("今日はいい天気だ。散歩でもしようか", "window",
+                                              caret=len("今日はいい天気だ。散歩でもしようか"))
+
+    def test_caret_stays_after_punctuation_and_before_suffix(self):
+        from kana_rewriter.text import split_at_caret
+        source = "前。さんぽ?!後ろ"
+        original_caret = len("前。さんぽ?!")
+        desktop = Mock()
+        captured = Capture(source, ("window", 1, 2), split_at_caret(source, original_caret), original_caret)
+        desktop.stamp.return_value = captured.stamp
+        desktop.copy_selection.return_value = source
+        apply_result(desktop, captured, "散歩")
+        desktop.replace.assert_called_once_with("前。散歩?!後ろ", "window", caret=len("前。散歩?!"))
+
     def test_direct_model_is_cached_and_uses_chat_api(self):
         with tempfile.NamedTemporaryFile(suffix=".gguf") as file:
             model = Mock()

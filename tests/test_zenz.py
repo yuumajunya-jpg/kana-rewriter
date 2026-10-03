@@ -22,9 +22,32 @@ class ZenzTests(unittest.TestCase):
         self.assertEqual(split_at_caret("私はきょう", 5), TextRegion("私", "はきょう", ""))
 
     def test_no_hiragana_at_caret(self):
-        for line, caret in (("今日", 2), ("きょう。", 4), ("", 0), ("きょう", 0)):
+        for line, caret in (("今日", 2), ("今日。", 3), ("？！", 2), ("。", 1), ("", 0), ("きょう", 0)):
             with self.assertRaises(ValueError):
                 split_at_caret(line, caret)
+
+    def test_trailing_punctuation_is_retained(self):
+        for punctuation in ("。", "、", "？", "?", "！", "!", ",", ".", "，", "．", "?!", "。。"):
+            with self.subTest(punctuation=punctuation):
+                text = "前。きょう" + punctuation + "後"
+                region = split_at_caret(text, len(text) - 1)
+                self.assertEqual(region, TextRegion("前。", "きょう", punctuation + "後"))
+                self.assertEqual(region.rebuild("今日"), "前。今日" + punctuation + "後")
+
+    def test_sentence_final_period_is_preserved_and_scan_stops_at_boundary(self):
+        for left in ("まえ。", "漢"):
+            with self.subTest(left=left):
+                line = left + "さんぽでもしようか。後ろ"
+                caret = len(left + "さんぽでもしようか。")
+                region = split_at_caret(line, caret)
+                self.assertEqual(region, TextRegion(left, "さんぽでもしようか", "。後ろ"))
+                self.assertEqual(region.rebuild("散歩でもしようか"), left + "散歩でもしようか。後ろ")
+
+    def test_sentence_final_period_at_end_of_line(self):
+        line = "今日はいい天気だ。さんぽでもしようか。"
+        region = split_at_caret(line, len(line))
+        self.assertEqual(region, TextRegion("今日はいい天気だ。", "さんぽでもしようか", "。"))
+        self.assertEqual(region.rebuild("散歩でもしようか"), "今日はいい天気だ。散歩でもしようか。")
 
     def test_caret_bounds(self):
         for caret in (-1, 10):
@@ -105,7 +128,8 @@ class ZenzTests(unittest.TestCase):
         desktop.copy_selection.return_value = original
         self.assertEqual(capture.source, "はいしゃ")
         self.assertTrue(apply_result(desktop, capture, "歯医者"))
-        desktop.replace.assert_called_once_with(region.rebuild("歯医者"), "window")
+        desktop.replace.assert_called_once_with(region.rebuild("歯医者"), "window",
+                                              caret=len(region.left + "歯医者"))
 
     def test_region_no_change_does_not_reinsert_line(self):
         desktop = Mock()
