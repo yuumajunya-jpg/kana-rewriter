@@ -2,6 +2,7 @@
 import logging
 import multiprocessing
 import time
+import sys
 
 from .editor import make_capture, replacement_plan
 
@@ -43,10 +44,19 @@ class EditorEngine:
         tick = input_tick()
         editor = self.editor()
         state = editor.read()
+        logger.debug("取得: 方式=%s / 本文文字数=%s / 選択=%s:%s / 左側=%r / 選択文字=%r / 右側=%r",
+                     editor.kind, len(state.text), state.start, state.end,
+                     state.text[max(0, state.start - 80):state.start],
+                     state.text[state.start:min(state.end, state.start + 80)],
+                     state.text[state.end:state.end + 80])
         if window_identity() != target or input_tick() != tick:
             raise RuntimeError("本文の取得中に操作があったため中止しました")
         self.counter += 1
-        capture = make_capture(state, (target, tick), mode, self.config, self.counter)
+        try:
+            capture = make_capture(state, (target, tick), mode, self.config, self.counter)
+        except ValueError as exc:
+            raise ValueError(f"{exc}（{editor.kind}: 取得本文{len(state.text)}文字、"
+                             f"カーソル/選択{state.start}:{state.end}。--debugで取得内容を確認）") from exc
         self.saved = (capture, editor, state)
         logger.debug("編集方式=%s / 対象=%r / 左文脈末尾=%r / 右文脈先頭=%r",
                      editor.kind, capture.source, capture.left_context[-self.config.context_chars:],
@@ -54,6 +64,21 @@ class EditorEngine:
         return capture
 
     def apply(self, capture, result):
+        editor = self.saved[1] if self.saved is not None and self.saved[0] == capture else None
+        try:
+            return self.apply_once(capture, result)
+        finally:
+            finish = getattr(editor, "finish_edit", None)
+            if finish is not None:
+                failing = sys.exc_info()[0] is not None
+                try:
+                    finish()
+                except Exception as exc:
+                    if not failing:
+                        raise RuntimeError(f"編集後のIME復元に失敗しました。本文とIME状態を確認してください: {exc}") from exc
+                    logger.warning("中止後のIME復元に失敗しました: %s", exc)
+
+    def apply_once(self, capture, result):
         from .direct_win32 import window_identity, input_tick
         if self.saved is None or self.saved[0] != capture:
             raise RuntimeError("取得した編集対象が無効になっています")
@@ -73,18 +98,26 @@ class EditorEngine:
             raise RuntimeError("適用直前に操作があったため中止しました")
         editor.replace(state, start, end, result, expected_tick=tick)
         deadline = time.monotonic() + min(self.config.editor_timeout_seconds, 2)
+        insertion_end = start + len(result)
+        last_status = None
         while True:
             if window_identity() != target:
                 raise RuntimeError("入力後に入力先が変わりました。編集は再送しません")
-            updated = editor.read()
-            if updated.text == expected:
+            try:
+                updated = editor.read()
+            except Exception as exc:
+                raise RuntimeError(f"入力後の確認に失敗しました。編集は再送しません。本文を確認してください: {exc}") from exc
+            status = (updated.text, updated.start, updated.end)
+            if status != last_status:
+                logger.debug("反映確認: 本文一致=%s / 本文文字数=%s（期待%s） / 選択=%s:%s（期待%s:%s）",
+                             updated.text == expected, len(updated.text), len(expected),
+                             updated.start, updated.end, insertion_end, insertion_end)
+                last_status = status
+            if updated.text == expected and updated.start == updated.end == insertion_end:
                 break
             if editor.kind != "uia" or time.monotonic() >= deadline:
                 raise RuntimeError("差し替え結果を確認できませんでした。本文を確認してください。編集は再送しません")
             time.sleep(0.01)
-        insertion_end = start + len(result)
-        if updated.start != insertion_end or updated.end != insertion_end:
-            raise RuntimeError("入力後の選択位置が想定と異なります。カーソル復元を中止しました")
         after_input_tick = input_tick()
         if caret != insertion_end:
             if input_tick() != after_input_tick or window_identity() != target:

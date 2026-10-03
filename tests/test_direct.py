@@ -41,6 +41,29 @@ class SnapshotTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class EngineTests(unittest.TestCase):
+    def test_foreign_thread_ime_context_is_not_used_to_block_conversion(self):
+        from kana_rewriter import direct_win32 as win
+        with patch.object(win.user, "GetAsyncKeyState", return_value=0), \
+                patch.object(win.user, "GetWindowThreadProcessId", return_value=101), \
+                patch.object(win.kernel, "GetCurrentThreadId", return_value=202), \
+                patch.object(win.imm, "ImmGetContext", return_value=123) as get_context, \
+                patch.object(win.imm, "ImmGetCompositionStringW", return_value=8) as composition:
+            win.check_input_ready(999)
+        get_context.assert_not_called()
+        composition.assert_not_called()
+
+    def test_local_ime_composition_is_rejected_and_context_released(self):
+        from kana_rewriter import direct_win32 as win
+        with patch.object(win.user, "GetAsyncKeyState", return_value=0), \
+                patch.object(win.user, "GetWindowThreadProcessId", return_value=101), \
+                patch.object(win.kernel, "GetCurrentThreadId", return_value=101), \
+                patch.object(win.imm, "ImmGetContext", return_value=123), \
+                patch.object(win.imm, "ImmGetCompositionStringW", return_value=8), \
+                patch.object(win.imm, "ImmReleaseContext") as release:
+            with self.assertRaisesRegex(RuntimeError, "IMM"):
+                win.check_input_ready(999)
+        release.assert_called_once_with(999, 123)
+
     def test_worker_timeout_stops_and_never_replays(self):
         from kana_rewriter.direct import Desktop
         desktop = Desktop(Config())
@@ -72,6 +95,17 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(engine.apply(capture, "散歩"))
         editor.replace.assert_called_once_with(state, 0, 3, "散歩", expected_tick=10)
         editor.restore_caret.assert_called_once_with(TextState("散歩。あと", 2, 2), 3, expected_tick=10)
+
+    def test_uia_waits_for_caret_even_when_text_is_already_updated(self):
+        engine, editor, state, capture = self.prepare()
+        editor.kind = "uia"
+        editor.read.side_effect = [state, TextState("散歩。あと", 0, 2),
+                                   TextState("散歩。あと", 2, 2), TextState("散歩。あと", 3, 3)]
+        with patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
+                patch("kana_rewriter.direct_win32.input_tick", return_value=10):
+            self.assertTrue(engine.apply(capture, "散歩"))
+        editor.replace.assert_called_once()
+        self.assertEqual(editor.read.call_count, 4)
 
     def test_input_or_document_changes_cancel_and_consume_token(self):
         for tick, state_changed in [(11, False), (10, True)]:
@@ -222,6 +256,282 @@ class Range:
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class UiaRangeTests(unittest.TestCase):
+    def test_full_normal_conversion_with_live_uia_ranges_and_async_input(self):
+        from kana_rewriter.direct import EditorEngine
+        editor, model = self.prepare()
+        prefix = "文。\n" * 27 + "\n\n" + "今日はいい天気だ。"
+        source, result = "さいきんあめつづきなので", "最近雨続きなので"
+        model.text = prefix + source
+        model.boundaries = list(range(len(model.text) + 1))
+        model.selected = Range(model, len(model.text), len(model.text))
+        model.pending = ""
+        trace = []
+        session = editor.ime_session_factory.return_value
+        session.disable.side_effect = lambda: trace.append("ime_off")
+
+        def restore_ime():
+            self.assertEqual(model.text, prefix + result)
+            self.assertEqual((model.selected.start, model.selected.end), (100, 100))
+            trace.append("ime_restored")
+
+        session.close.side_effect = restore_ime
+        test_case = self
+
+        class LiveRange(Range):
+            def GetText(self, limit):
+                if model.pending:
+                    test_case.assertEqual(trace[-1], "input_sent")
+                    # The browser applies the remaining queued characters
+                    # after DocumentRange.GetText but before GetSelection.
+                    before = super().GetText(limit)
+                    model.text += model.pending
+                    model.pending = ""
+                    model.selected = Range(model, len(model.text), len(model.text))
+                    trace.append("input_applied")
+                    return before
+                return super().GetText(limit)
+
+        class LivePattern:
+            @property
+            def DocumentRange(self):
+                return LiveRange(model)
+
+        editor.pattern = LivePattern()
+        engine = EditorEngine(Config())
+
+        def deliver_unicode_input(events):
+            self.assertEqual(trace[-1], "ime_off")
+            trace.append("input_sent")
+            payload = b"".join(event.scan.to_bytes(2, "little") for event in events if event.flags == 4)
+            delivered = payload.decode("utf-16-le")
+            self.assertEqual(delivered, result)
+            self.assertEqual((model.selected.start, model.selected.end), (92, 104))
+            self.assertEqual(model.text[model.selected.start:model.selected.end], source)
+            model.text = model.text[:model.selected.start] + delivered[:1]
+            model.pending = delivered[1:]
+            model.selected = Range(model, len(model.text), len(model.text))
+
+        with patch.object(engine, "editor", return_value=editor), \
+                patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
+                patch("kana_rewriter.direct_win32.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_win32.check_input_ready"), \
+                patch("kana_rewriter.winapi.user.GetAsyncKeyState", return_value=0), \
+                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send", side_effect=deliver_unicode_input) as send:
+            capture = engine.capture("line", 1000)
+            self.assertEqual(capture.source, source)
+            self.assertEqual(len(capture.text), 104)
+            self.assertTrue(apply_result(engine, capture, result))
+        self.assertEqual(model.text, prefix + result)
+        self.assertEqual((model.selected.start, model.selected.end), (100, 100))
+        send.assert_called_once()
+        self.assertIsNone(engine.saved)
+        self.assertEqual(trace, ["ime_off", "input_sent", "input_applied", "ime_restored"])
+        session.close.assert_called_once()
+
+    def test_ime_switch_or_input_failure_restores_without_resending(self):
+        from kana_rewriter.direct import EditorEngine
+        for stage in ("switch", "send"):
+            with self.subTest(stage=stage):
+                editor, _ = self.prepare()
+                state = editor.read()
+                capture = make_capture(state, ((1, 2, 3), 10), "line", Config(), 1)
+                engine = EditorEngine(Config())
+                engine.saved = (capture, editor, state)
+                session = editor.ime_session_factory.return_value
+                if stage == "switch":
+                    session.disable.side_effect = RuntimeError("IME切替失敗")
+                with patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
+                        patch("kana_rewriter.direct_win32.input_tick", return_value=10), \
+                        patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                        patch("kana_rewriter.direct_uia.check_input_ready"), \
+                        patch("kana_rewriter.direct_uia.send", side_effect=RuntimeError("送信失敗")) as send:
+                    with self.assertRaises(RuntimeError):
+                        engine.apply(capture, "散歩")
+                    with self.assertRaises(RuntimeError):
+                        engine.apply(capture, "散歩")
+                session.close.assert_called_once()
+                self.assertEqual(send.call_count, 0 if stage == "switch" else 1)
+
+    def test_persistent_snapshot_inconsistency_does_not_pass_validation(self):
+        from kana_rewriter.direct_uia import SnapshotPending
+        editor, _ = self.prepare()
+        editor.timeout = 0
+        with patch.object(editor, "read_once", side_effect=SnapshotPending("不一致")):
+            with self.assertRaisesRegex(RuntimeError, "整合する状態を確認できません"):
+                editor.read()
+
+    def test_normal_write_can_update_document_between_text_and_selection_reads(self):
+        editor, model = self.prepare()
+        model.text = "前。さんぽ"
+        model.selected = Range(model, 5, 5)
+        old_text = model.text
+
+        class UpdatingRange(Range):
+            def GetText(self, limit):
+                if not model.updated:
+                    model.updated = True
+                    model.text = "前。散歩"
+                    model.selected = Range(model, 4, 4)
+                    return old_text
+                return super().GetText(limit)
+
+        class UpdatingPattern:
+            @property
+            def DocumentRange(self):
+                return UpdatingRange(model)
+
+        model.updated = False
+        editor.pattern = UpdatingPattern()
+        self.assertEqual(editor.read(), TextState("前。散歩", 4, 4))
+
+    def test_native_edit_context_instruction_is_not_treated_as_document(self):
+        editor, model = self.prepare()
+        model.text = "この時点では、エディターにアクセスできません。"
+        editor.pattern.DocumentRange = Range(model)
+        editor.focused = SimpleNamespace(CurrentClassName="native-edit-context", CurrentName=model.text)
+        editor.selection = Mock()
+        with self.assertRaisesRegex(RuntimeError, "Shift\\+Alt\\+F1"):
+            editor.read()
+        editor.selection.assert_not_called()
+
+    def test_accessible_native_edit_context_real_text_is_read(self):
+        editor, model = self.prepare()
+        editor.focused = SimpleNamespace(CurrentClassName="native-edit-context", CurrentName="エディターコンテンツ")
+        self.assertEqual(editor.read(), TextState(model.text, 9, 9))
+
+    def test_dedicated_caret_api_overrides_placeholder_zero_selection(self):
+        editor, model = self.prepare()
+        del editor.selection
+        editor.element = object()
+        placeholder = Range(model, 0, 0)
+        editor.pattern.GetSelection = lambda: SimpleNamespace(Length=1, GetElement=lambda _: placeholder)
+        dedicated = Mock()
+        dedicated.GetCaretRange.return_value = (True, Range(model, 9, 9))
+        editor.automation = SimpleNamespace(pattern=lambda element, name: dedicated)
+        self.assertEqual(editor.read(), TextState(model.text, 9, 9))
+        self.assertIn("GetCaretRange", editor.selection_source)
+
+    def test_real_selection_is_preserved_even_with_dedicated_caret(self):
+        editor, model = self.prepare()
+        del editor.selection
+        editor.element = object()
+        real_selection = Range(model, 5, 8)
+        editor.pattern.GetSelection = lambda: SimpleNamespace(Length=1, GetElement=lambda _: real_selection)
+        editor.automation = Mock()
+        self.assertEqual(editor.read(), TextState(model.text, 5, 8))
+        editor.automation.pattern.assert_not_called()
+
+    def test_inactive_caret_api_does_not_replace_collapsed_selection(self):
+        editor, model = self.prepare()
+        del editor.selection
+        editor.element = object()
+        selection = Range(model, 5, 5)
+        editor.pattern.GetSelection = lambda: SimpleNamespace(Length=1, GetElement=lambda _: selection)
+        dedicated = Mock()
+        dedicated.GetCaretRange.return_value = (False, Range(model, 9, 9))
+        editor.automation = SimpleNamespace(pattern=lambda element, name: dedicated)
+        self.assertEqual(editor.read(), TextState(model.text, 5, 5))
+
+    def test_selection_verification_uses_textual_positions(self):
+        editor, model = self.prepare()
+        state = editor.read()
+        target = editor.range_for(state, 5, 8)
+        target.CompareEndpoints = Mock(return_value=-1)
+        with patch.object(editor, "range_for", return_value=target), \
+                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send") as send:
+            editor.replace(state, 5, 8, "散歩")
+        send.assert_called_once()
+        target.CompareEndpoints.assert_not_called()
+
+    def test_incorrect_selection_never_sends_text(self):
+        editor, model = self.prepare()
+        editor.timeout = 0
+        state = editor.read()
+        target = editor.range_for(state, 5, 8)
+        target.Select = Mock()  # provider acknowledges but does not apply
+        with patch.object(editor, "range_for", return_value=target), \
+                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send") as send:
+            with self.assertRaisesRegex(RuntimeError, "要求5:8、実際9:9"):
+                editor.replace(state, 5, 8, "散歩")
+        send.assert_not_called()
+
+    def test_chromium_detection_uses_framework_or_window_class(self):
+        from kana_rewriter.direct_uia import AutomationEditor
+        for framework, window_class, expected in [("Chrome", "other", True),
+                                                   ("Win32", "chrome_renderwidgethosthwnd", True),
+                                                   ("Firefox", "mozillawindowclass", False)]:
+            with self.subTest(framework=framework, window_class=window_class):
+                focused = SimpleNamespace(CurrentFrameworkId=framework, GetRuntimeId=lambda: [1, 2],
+                                          CurrentClassName="input", CurrentControlType=50004,
+                                          CurrentName="input")
+                with patch("kana_rewriter.direct_uia.window_identity", return_value=(1, 2, 3)), \
+                        patch("kana_rewriter.direct_uia.class_name", return_value=window_class), \
+                        patch.object(AutomationEditor, "check_writable"):
+                    editor = AutomationEditor(Mock(), focused, focused, Mock(), Config())
+                self.assertEqual(editor.chromium, expected)
+                self.assertEqual(editor.ime_check, "auto")
+
+    def test_only_nonempty_active_uia_composition_blocks_editing(self):
+        for distance, text, blocked in [(0, "残存文字", False), (-1, "あ", True), (-1, "", False)]:
+            with self.subTest(distance=distance, text=text):
+                editor, _ = self.prepare()
+                editor.ime_check, editor.chromium = "strict", False
+                active = Mock()
+                active.CompareEndpoints.return_value = distance
+                active.GetText.return_value = text
+                composing = Mock()
+                composing.GetActiveComposition.return_value = active
+                editor.focused = SimpleNamespace(CurrentIsPassword=False, CurrentIsEnabled=True,
+                                                 CurrentHasKeyboardFocus=True)
+                editor.element = object()
+                editor.pattern.DocumentRange.GetAttributeValue = lambda attribute: False
+                editor.automation = SimpleNamespace(
+                    types=SimpleNamespace(UIA_IsReadOnlyAttributeId=1),
+                    pattern=lambda element, name: composing if name == "TextEditPattern" else None)
+                # prepare() mocks this method for range-only tests.
+                from kana_rewriter.direct_uia import AutomationEditor
+                if blocked:
+                    with self.assertRaisesRegex(RuntimeError, "UIA TextEditPattern"):
+                        AutomationEditor.check_writable(editor)
+                else:
+                    AutomationEditor.check_writable(editor)
+                if distance == 0:
+                    active.GetText.assert_not_called()
+
+    def test_chromium_cached_composition_is_advisory_in_auto_mode(self):
+        from kana_rewriter.direct_uia import AutomationEditor
+        for mode, chromium, blocked in [("auto", True, False), ("strict", True, True),
+                                        ("auto", False, True), ("off", True, False)]:
+            with self.subTest(mode=mode, chromium=chromium):
+                editor, _ = self.prepare()
+                editor.ime_check, editor.chromium = mode, chromium
+                editor.focused = SimpleNamespace(CurrentIsPassword=False, CurrentIsEnabled=True,
+                                                 CurrentHasKeyboardFocus=True)
+                editor.element = object()
+                editor.pattern.DocumentRange.GetAttributeValue = lambda _: False
+                active = Mock()
+                active.CompareEndpoints.return_value = -1
+                active.GetText.return_value = "確定した文章"
+                composing = Mock()
+                composing.GetActiveComposition.return_value = active
+                editor.automation = SimpleNamespace(
+                    types=SimpleNamespace(UIA_IsReadOnlyAttributeId=1),
+                    pattern=Mock(side_effect=lambda element, name: composing
+                                 if name == "TextEditPattern" else None))
+                if blocked:
+                    with self.assertRaisesRegex(RuntimeError, "UIA TextEditPattern"):
+                        AutomationEditor.check_writable(editor)
+                else:
+                    AutomationEditor.check_writable(editor)
+                if mode == "off":
+                    composing.GetActiveComposition.assert_not_called()
+
     def prepare(self):
         from kana_rewriter.direct_uia import AutomationEditor
         model = SimpleNamespace(text="前😀e\u0301。さんぽ。後", boundaries=[0, 1, 2, 4, 5, 6, 7, 8, 9, 10])
@@ -231,6 +541,7 @@ class UiaRangeTests(unittest.TestCase):
         editor.pattern = SimpleNamespace(DocumentRange=Range(model))
         editor.check_focus = Mock()
         editor.check_writable = Mock()
+        editor.ime_session_factory = Mock(return_value=Mock())
         editor.selection = lambda: model.selected
         return editor, model
 

@@ -1,9 +1,14 @@
 """Clipboard-free messages to Unicode Edit/RichEdit controls."""
 import ctypes as C
+import logging
 from ctypes import wintypes as W
 
 from .editor import TextState, python_offset, utf16_length
 from .winapi import user, focus, LastInput, KeyboardInput, send
+
+logger = logging.getLogger(__name__)
+kernel = C.WinDLL("kernel32", use_last_error=True)
+kernel.GetCurrentThreadId.restype = W.DWORD
 
 
 get_window_style = getattr(user, "GetWindowLongPtrW", user.GetWindowLongW)
@@ -47,11 +52,20 @@ def is_standard_edit(hwnd):
 def check_input_ready(hwnd):
     if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
         raise RuntimeError("修飾キーが押されているため中止しました")
+    # IMM is a thread-owned input context, not an authoritative composition
+    # query for an external editor. For external controls TextEditPattern is
+    # checked by the UIA backend when available.
+    thread = user.GetWindowThreadProcessId(hwnd, None)
+    if thread != kernel.GetCurrentThreadId():
+        logger.debug("IME判定: 別スレッドの入力欄のためIMM直接照会を省略")
+        return
     context = imm.ImmGetContext(hwnd)
     if context:
         try:
-            if imm.ImmGetCompositionStringW(context, 8, None, 0) > 0:
-                raise RuntimeError("IMEの入力を確定してから変換してください")
+            length = imm.ImmGetCompositionStringW(context, 8, None, 0)
+            logger.debug("IME判定: 自スレッドのIMM / 未確定文字列bytes=%s", length)
+            if length > 0:
+                raise RuntimeError("IMEの入力を確定してから変換してください（IMM）")
         finally:
             imm.ImmReleaseContext(hwnd, context)
 

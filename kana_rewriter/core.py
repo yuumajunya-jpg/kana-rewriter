@@ -35,10 +35,13 @@ class Config:
     hotkey_selection: str = "Ctrl+Alt+J"
     hotkey_quit: str = ""
     edit_backend: str = "auto"
+    uia_ime_check: str = "auto"
     editor_timeout_seconds: float = 5
     max_document_chars: int = 200000
 
     def __post_init__(self):
+        if self.uia_ime_check not in {"auto", "strict", "off"}:
+            raise ValueError("uia_ime_checkはauto・strict・offです")
         if self.edit_backend not in {"auto", "win32", "uia", "clipboard"}:
             raise ValueError("edit_backendはauto・win32・uia・clipboardです")
         if not 1 <= self.editor_timeout_seconds <= 30 or not 1000 <= self.max_document_chars <= 1000000:
