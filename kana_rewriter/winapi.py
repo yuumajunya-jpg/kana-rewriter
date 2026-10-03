@@ -51,6 +51,32 @@ user.SendMessageTimeoutW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM,
 user.SendMessageTimeoutW.restype = W.LPARAM
 
 
+class MessageWaiter:
+    """Wake on hotkeys/completion, including notifications already queued."""
+    WAKE_MESSAGE = 0x8001
+
+    def __init__(self):
+        kernel = C.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentThreadId.restype = W.DWORD
+        self.thread_id = kernel.GetCurrentThreadId()
+        user.PostThreadMessageW.argtypes = [W.DWORD, W.UINT, W.WPARAM, W.LPARAM]
+        user.MsgWaitForMultipleObjectsEx.argtypes = [W.DWORD, C.POINTER(W.HANDLE),
+                                                   W.DWORD, W.DWORD, W.DWORD]
+        user.MsgWaitForMultipleObjectsEx.restype = W.DWORD
+        message = W.MSG()
+        user.PeekMessageW(C.byref(message), None, 0, 0, 0)
+
+    def wake(self, future=None):
+        user.PostThreadMessageW(self.thread_id, self.WAKE_MESSAGE, 0, 0)
+
+    def wait(self):
+        # Timeout keeps Ctrl+C responsive; messages normally wake immediately.
+        result = user.MsgWaitForMultipleObjectsEx(0, None, 100, 0x04FF, 0x0004)
+        if result == 0xFFFFFFFF:
+            raise C.WinError(C.get_last_error())
+        return result
+
+
 def send(events):
     inputs = (Input * len(events))(*(Input(1, InputUnion(keyboard=e)) for e in events))
     if user.SendInput(len(inputs), inputs, C.sizeof(Input)) != len(inputs):

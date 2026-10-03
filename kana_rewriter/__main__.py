@@ -8,6 +8,16 @@ import json
 
 from .core import Config, Converter, apply_result
 from .hotkeys import parse_hotkey
+from .timing import stage
+
+logger = logging.getLogger(__name__)
+
+
+@stage("変換/AI呼び出し")
+def timed_conversion(converter, captured):
+    started = time.perf_counter()
+    result = converter.convert_selection(captured.source, captured.left_context, captured.right_context)
+    return result, time.perf_counter() - started
 
 
 def main():
@@ -51,7 +61,7 @@ def main():
 
 
 def run_windows(converter, config, debug=False):
-    from .winapi import user, W
+    from .winapi import user, W, MessageWaiter
     bindings = {1: parse_hotkey(config.hotkey_line), 2: parse_hotkey(config.hotkey_selection)}
     if config.hotkey_quit:
         bindings[3] = parse_hotkey(config.hotkey_quit)
@@ -68,10 +78,13 @@ def run_windows(converter, config, debug=False):
         from .direct import Desktop
         desktop = Desktop(config, debug=debug)
     try:
+        waiter = MessageWaiter()
         for ident, binding in bindings.items():
             if not user.RegisterHotKey(None, ident, 0x4000 | binding.modifiers, binding.key):
                 raise RuntimeError(f"ショートカット {binding.label} を登録できません。他アプリとの競合やOSの予約キーを確認してください")
             registered.append(ident)
+        if config.edit_backend != "clipboard":
+            desktop.warmup()
         quit_label = f" / {bindings[3].label} = 終了" if 3 in bindings else ""
         print(f"起動: {bindings[1].label} = カーソル左の区切りまで / "
               f"{bindings[2].label} = 選択範囲{quit_label} / この端末でCtrl+C = 終了", flush=True)
@@ -83,22 +96,33 @@ def run_windows(converter, config, debug=False):
                     return 0
                 if message.message == 0x0312 and message.wParam in (1, 2) and pending is None:
                     try:
+                        started = time.perf_counter()
                         captured = desktop.capture("line" if message.wParam == 1 else "selection",
                                                    config.max_chars, trigger_keys=(bindings[message.wParam].key,))
-                        pending = (pool.submit(converter.convert_selection, captured.source,
-                                               captured.left_context, captured.right_context), captured)
-                        print("変換中（操作すると差し替えを中止します）…", flush=True)
+                        capture_seconds = time.perf_counter() - started
+                        future = pool.submit(timed_conversion, converter, captured)
+                        pending = (future, captured, started, capture_seconds)
+                        future.add_done_callback(waiter.wake)
+                        print("変換中…", flush=True)
                     except Exception as exc:
                         print(f"中止: {exc}", flush=True)
             if pending is not None and pending[0].done():
-                future, captured = pending
+                future, captured, started, capture_seconds = pending
                 pending = None
                 try:
-                    changed = apply_result(desktop, captured, future.result())
+                    result, inference_seconds = future.result()
+                    applying = time.perf_counter()
+                    changed = apply_result(desktop, captured, result)
+                    finished = time.perf_counter()
+                    logger.debug("時間集計: 取得=%.1fms / AI=%.1fms / 適用=%.1fms / AI以外=%.1fms / 合計=%.1fms",
+                                 capture_seconds * 1000, inference_seconds * 1000,
+                                 (finished - applying) * 1000,
+                                 (finished - started - inference_seconds) * 1000,
+                                 (finished - started) * 1000)
                     print("差し替え処理を実行しました" if changed else "変換の必要はありません", flush=True)
                 except Exception as exc:
                     print(f"中止: {exc}", flush=True)
-            time.sleep(0.02)
+            waiter.wait()
     except KeyboardInterrupt:
         print("終了します", flush=True)
     finally:

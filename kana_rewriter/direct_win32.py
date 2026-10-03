@@ -1,11 +1,13 @@
 """Clipboard-free messages to Unicode Edit/RichEdit controls."""
 import ctypes as C
 import logging
+import time
 from ctypes import wintypes as W
 
 from .editor import TextState, python_offset, utf16_length
 from .winapi import user, focus, KeyboardInput, send
 from .input_activity import input_tick
+from .timing import stage
 
 logger = logging.getLogger(__name__)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -43,8 +45,8 @@ def is_standard_edit(hwnd):
     return name == "edit" or name.startswith("richedit")
 
 
-def check_input_ready(hwnd):
-    if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
+def check_input_ready(hwnd, allow_modifiers=False):
+    if not allow_modifiers and any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x10, 0x11, 0x12, 0x5B, 0x5C)):
         raise RuntimeError("修飾キーが押されているため中止しました")
     if any(user.GetAsyncKeyState(k) & 0x8000 for k in (0x01, 0x02, 0x04, 0x05, 0x06)):
         raise RuntimeError("マウスボタンが押されているため中止しました")
@@ -64,6 +66,20 @@ def check_input_ready(hwnd):
                 raise RuntimeError("IMEの入力を確定してから変換してください（IMM）")
         finally:
             imm.ImmReleaseContext(hwnd, context)
+
+
+@stage("適用/キー解放待ち")
+def wait_input_release(target, trigger_keys=()):
+    keys = (0x10, 0x11, 0x12, 0x5B, 0x5C) + tuple(trigger_keys)
+    deadline = time.monotonic() + 2
+    while True:
+        if window_identity() != target:
+            raise RuntimeError("キー解放待ちに入力先が変わりました")
+        if not any(user.GetAsyncKeyState(key) & 0x8000 for key in keys):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("ショートカットキーを離してください")
+        time.sleep(0.005)
 
 
 def unicode_events(text):
@@ -108,6 +124,7 @@ class NativeEditor:
             raise RuntimeError("入力欄が応答しないか、権限が一致しません。編集は再送しません")
         return result.value
 
+    @stage("Win32/本文と位置取得")
     def read(self):
         length = self.message(0x000E)
         if length > self.limit * 2:
@@ -130,6 +147,7 @@ class NativeEditor:
     def select(self, state, start, end):
         self.message(0x00B1, utf16_length(state.text[:start]), utf16_length(state.text[:end]))
 
+    @stage("Win32/選択と置換")
     def replace(self, state, start, end, result, expected_tick=None):
         tick = input_tick() if expected_tick is None else expected_tick
         if window_identity() != self.window or input_tick() != tick:

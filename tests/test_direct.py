@@ -83,6 +83,7 @@ class EngineTests(unittest.TestCase):
         state = TextState(text, caret, caret)
         capture = make_capture(state, ((1, 2, 3), 10), "line", Config(), 1)
         editor = Mock(kind="win32")
+        editor.wait_for_state = None
         engine = EditorEngine(Config())
         engine.saved = (capture, editor, state)
         return engine, editor, state, capture
@@ -162,7 +163,7 @@ class EngineTests(unittest.TestCase):
                         patch("kana_rewriter.direct_win32.check_input_ready"), \
                         patch("kana_rewriter.direct_win32.input_tick", side_effect=[10, 11]), \
                         patch("kana_rewriter.direct_win32.window_identity",
-                              side_effect=[(1, 2, 3), (1, 2, 3), target]):
+                              side_effect=[(1, 2, 3), target]):
                     if allowed:
                         self.assertEqual(engine.capture("line", 1000).source, "さんぽ")
                     else:
@@ -519,7 +520,8 @@ class UiaRangeTests(unittest.TestCase):
             model.pending = delivered[1:]
             model.selected = Range(model, len(model.text), len(model.text))
 
-        with patch.object(engine, "editor", return_value=editor), \
+        with self.assertLogs("kana_rewriter.timing", level="DEBUG") as timings, \
+                patch.object(engine, "editor", return_value=editor), \
                 patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
                 patch("kana_rewriter.direct_win32.input_tick", side_effect=moving_pointer), \
                 patch("kana_rewriter.direct_win32.check_input_ready"), \
@@ -538,6 +540,12 @@ class UiaRangeTests(unittest.TestCase):
         self.assertIsNone(engine.saved)
         self.assertEqual(trace, ["ime_off", "input_sent", "input_applied", "ime_restored"])
         session.close.assert_called_once()
+
+        timing_text = "\n".join(timings.output)
+        for label in ("取得/全体", "適用/キー解放待ち", "UIA/範囲構築", "UIA/選択反映待ち",
+                      "UIA/IME状態取得と一時オフ", "UIA/SendInput送信", "適用/入力反映確認",
+                      "適用/カーソル復元と確認", "適用/IME復元"):
+            self.assertIn(label + "=", timing_text)
 
     def test_ime_switch_or_input_failure_restores_without_resending(self):
         from kana_rewriter.direct import EditorEngine
