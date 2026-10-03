@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 local = ["llama-cpp-python>=0.3,<0.4"]
+desktop = ["comtypes>=1.4,<2; sys_platform == 'win32'"]
 
 [project.scripts]
 kana-rewriter = "kana_rewriter.__main__:main"

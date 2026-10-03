@@ -4,6 +4,7 @@ import ctypes
 import sys
 import time
 import logging
+import json
 
 from .core import Config, Converter, apply_result
 from .hotkeys import parse_hotkey
@@ -15,13 +16,26 @@ def main():
     parser.add_argument("--text", help="ウィンドウを操作せず、接続・変換を確認")
     parser.add_argument("--left-context", default="", help="--textの左文脈")
     parser.add_argument("--right-context", default="", help="--textの右文脈")
-    parser.add_argument("--debug", action="store_true", help="取得文字列・モデル出力・完成文・貼り付け方式を端末に表示")
+    parser.add_argument("--debug", action="store_true", help="変換対象・文脈・モデル出力・編集方式を端末に表示")
+    parser.add_argument("--inspect", action="store_true", help="3秒後の入力欄の直接編集能力を表示（文字変更なし）")
     args = parser.parse_args()
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format="[診断] %(message)s")
     try:
         config = Config.load(args.config) if args.config else Config()
         converter = Converter(config)
+        if args.inspect:
+            if sys.platform != "win32":
+                raise RuntimeError("入力欄の診断はWindows専用です")
+            from .direct import Desktop
+            print("3秒以内に診断する入力欄へフォーカスを移してください", flush=True)
+            time.sleep(3)
+            desktop = Desktop(config, debug=args.debug)
+            try:
+                print(json.dumps(desktop.inspect(), ensure_ascii=False, indent=2))
+            finally:
+                desktop.close()
+            return 0
         if args.text is not None:
             print(converter.convert_selection(args.text, args.left_context, args.right_context))
             return 0
@@ -30,24 +44,29 @@ def main():
         if config.backend == "llama_cpp":
             print("GGUFモデルを読み込んでいます…", flush=True)
             converter.load_model()
-        return run_windows(converter, config)
+        return run_windows(converter, config, debug=args.debug)
     except Exception as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return 1
 
 
-def run_windows(converter, config):
-    from .windows import Desktop, user, W
+def run_windows(converter, config, debug=False):
+    from .winapi import user, W
     bindings = {1: parse_hotkey(config.hotkey_line), 2: parse_hotkey(config.hotkey_selection)}
     if config.hotkey_quit:
         bindings[3] = parse_hotkey(config.hotkey_quit)
     registered = []
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
-    desktop = Desktop(paste_wait_seconds=config.paste_wait_seconds,
-                      conversion_delimiters=config.conversion_delimiters,
-                      stop_at_kanji=config.stop_at_kanji,
-                      trailing_punctuation=config.trailing_punctuation)
+    if config.edit_backend == "clipboard":
+        from .windows import Desktop
+        desktop = Desktop(paste_wait_seconds=config.paste_wait_seconds,
+                          conversion_delimiters=config.conversion_delimiters,
+                          stop_at_kanji=config.stop_at_kanji,
+                          trailing_punctuation=config.trailing_punctuation)
+    else:
+        from .direct import Desktop
+        desktop = Desktop(config, debug=debug)
     try:
         for ident, binding in bindings.items():
             if not user.RegisterHotKey(None, ident, 0x4000 | binding.modifiers, binding.key):
@@ -76,7 +95,7 @@ def run_windows(converter, config):
                 pending = None
                 try:
                     changed = apply_result(desktop, captured, future.result())
-                    print("貼り付け処理を実行しました" if changed else "変換の必要はありません", flush=True)
+                    print("差し替え処理を実行しました" if changed else "変換の必要はありません", flush=True)
                 except Exception as exc:
                     print(f"中止: {exc}", flush=True)
             time.sleep(0.02)

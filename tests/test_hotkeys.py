@@ -61,7 +61,8 @@ class HotkeyTests(unittest.TestCase):
                 patch.object(win, "Desktop") as desktop, \
                 patch("kana_rewriter.__main__.ThreadPoolExecutor") as pool, patch("builtins.print"):
             self.assertEqual(run_windows(Mock(), Config(hotkey_line="Ctrl+Shift+K",
-                              hotkey_selection="F8", hotkey_quit="Ctrl+Alt+Q")), 0)
+                              hotkey_selection="F8", hotkey_quit="Ctrl+Alt+Q",
+                              edit_backend="clipboard")), 0)
         self.assertEqual(register.call_args_list,
                          [call(None, 1, 0x4006, ord("K")), call(None, 2, 0x4000, 0x77),
                           call(None, 3, 0x4003, ord("Q"))])

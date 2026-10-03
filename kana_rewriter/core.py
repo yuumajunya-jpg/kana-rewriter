@@ -34,8 +34,15 @@ class Config:
     hotkey_line: str = "Ctrl+Alt+K"
     hotkey_selection: str = "Ctrl+Alt+J"
     hotkey_quit: str = ""
+    edit_backend: str = "auto"
+    editor_timeout_seconds: float = 5
+    max_document_chars: int = 200000
 
     def __post_init__(self):
+        if self.edit_backend not in {"auto", "win32", "uia", "clipboard"}:
+            raise ValueError("edit_backendはauto・win32・uia・clipboardです")
+        if not 1 <= self.editor_timeout_seconds <= 30 or not 1000 <= self.max_document_chars <= 1000000:
+            raise ValueError("editor_timeout_secondsは1〜30秒、max_document_charsは1000〜1000000です")
         if not isinstance(self.hotkey_quit, str):
             raise ValueError("hotkey_quitは文字列で指定してください（空文字列で無効化）")
         bindings = [parse_hotkey(self.hotkey_line), parse_hotkey(self.hotkey_selection)]
@@ -222,6 +229,7 @@ class Capture:
     stamp: object
     region: TextRegion | None = None
     caret: int | None = None
+    edit_token: int | None = None
 
     @property
     def source(self):
@@ -240,6 +248,8 @@ def apply_result(backend, capture: Capture, result: str) -> bool:
     """Revalidate before touching the editor. Backend owns platform mechanics."""
     if result == capture.source:
         return False
+    if capture.edit_token is not None:
+        return backend.apply(capture, result)
     if backend.stamp() != capture.stamp:
         raise RuntimeError("待機中に操作またはフォーカス変更があったため中止しました")
     if backend.copy_selection() != capture.text:
