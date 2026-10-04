@@ -21,18 +21,25 @@ copy config.example.toml config.toml
 
 既存の設定ファイルは上書きせず、そのまま利用してください。`llama-cpp-python`の構築にはVisual StudioのC++ツールが必要になる場合があります。[公式インストール手順](https://github.com/abetlen/llama-cpp-python#installation)を参照してください。
 
-確認済みモデルは**jinen-v1-xsmall / Q5_K_M（約31.2MB）**です。GGUFを含む固定リビジョンから取得します。
+現在の利用・速度計測に使っているモデルは**jinen-v2-xsmall / Q5_K_M（約28.3MB）**です。以下の固定リビジョンから、利用者環境と同じGGUFを取得できます。
 
 ```cmd
-.\.venv\Scripts\hf.exe download togatogah/jinen-v1-xsmall jinen-v1-xsmall-Q5_K_M.gguf --revision 6ec3b6ae261939271c6bd0b9385553ee0ae0a93c --local-dir models
-certutil -hashfile models\jinen-v1-xsmall-Q5_K_M.gguf SHA256
+.\.venv\Scripts\hf.exe download togatogah/jinen-v2-xsmall.gguf jinen-v2-xsmall-Q5_K_M.gguf --revision b91eac974998a37423ca8a1198fd7c5631b06e57 --local-dir models
+certutil -hashfile models\jinen-v2-xsmall-Q5_K_M.gguf SHA256
 ```
 
-確認済みSHA256: `bb3110f06e539bf8596756df85a48b3946f1378e6cb912322b9c368be06d79aa`。モデルの比較・取得できない場合の確認先は[MODELS.md](MODELS.md)を参照してください。モデルファイルはこのリポジトリに含めません。
+確認済みSHA256: `24ff3af5db712fbbb4aa9254ee28ec4d731207134471ab68b06c1828726284c2`。[配布元の固定コミット](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/commit/b91eac974998a37423ca8a1198fd7c5631b06e57)とローカルファイルのハッシュが一致しています。`config.toml`は次の組み合わせで設定してください。更新前の設定がある場合はこの2項目を変更します。
+
+```toml
+model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
+model_format = "jinen_v2"
+```
+
+v2の入力はプロンプト全体をNFKC正規化します。`model_format`も必ずv2に合わせてください。モデルの比較・入力形式は[MODELS.md](MODELS.md)を参照してください。モデルファイルはこのリポジトリに含めません。
 
 ## 動作確認と起動
 
-入力欄を操作せずに変換を確認します。利用者環境では順に「歯医者」「廃車」を確認しています。
+入力欄を操作せずに変換を確認します。以下は文脈による変換を確認するための入力例です。出力はモデル・設定により変わります。
 
 ```cmd
 .\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --text "はいしゃ" --left-context "歯が痛いので、"

@@ -34,10 +34,10 @@ zenz_v3_2:  \uEE02左文脈\uEE07右文脈\uEE00カタカナの読み\uEE01
 
 空文脈の扱いも形式に合わせます。余分なBOS/EOSを追加せず、temperature=0、反復ペナルティなしで生成します。EOS/`</s>`で停止し、打ち切り・空出力・制御マーカー・空白や改行を含む結果は拒否します。
 
-jinen v2を使う場合は、ダウンロード後に`config.toml`の以下の2項目を変更して再起動します。smallとxsmall、各GGUF量子化版で同じ形式を使えます。
+現在の設定例・速度計測ではjinen-v2-xsmall / Q5_K_Mを使用します。`config.toml`は以下の組み合わせで設定します。smallとxsmall、各GGUF量子化版で同じ形式を使えます。
 
 ```toml
-model_path = "models/jinen-v2-small-Q5_K_M.gguf"
+model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
 model_format = "jinen_v2"
 ```
 

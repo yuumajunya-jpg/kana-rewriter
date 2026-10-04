@@ -1,7 +1,7 @@
 backend = "llama_cpp"
 # この設定ファイルからの相対パス、または絶対パス
-model_path = "models/jinen-v1-xsmall-Q5_K_M.gguf"
-model_format = "jinen_v1" # 専用マーカー + 生のcompletion API。左文脈対応
+model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
+model_format = "jinen_v2" # 左文脈対応。プロンプト全体をNFKC正規化してcompletion APIへ
 context_chars = 64 # 文脈の最大文字数
 conversion_delimiters = "。" # Kで左へ走査するときの区切り。各文字を区切りとして扱う
 stop_at_kanji = true # Kの走査を漢字で止める
@@ -20,9 +20,12 @@ max_document_chars = 200000 # 本文取得の上限。超えた入力欄は中�
 n_ctx = 0 # GGUFの学習時のコンテキスト長を使用
 n_gpu_layers = 0 # CPU。GPU対応版を入れた場合は -1 で全層をGPUへ
 # 汎用チャットモデルを使う場合: model_format = "chat"
-# jinen v2の場合は上の2項目を変更:
+# jinen v2 smallを使う場合は上のmodel_pathを変更（model_formatは同じ）:
 # model_path = "models/jinen-v2-small-Q5_K_M.gguf"
 # model_format = "jinen_v2" # 左文脈対応、プロンプト全体をNFKC正規化
+# jinen v1を使う場合はmodel_pathとmodel_formatを両方変更:
+# model_path = "models/jinen-v1-xsmall-Q5_K_M.gguf"
+# model_format = "jinen_v1"
 # zenz-v3.2の場合: model_format = "zenz_v3_2"（左右文脈。独自ランタイムが必要）
 # chat_format = "chatml" # chatの場合のみ
 

@@ -1,4 +1,25 @@
-# かな漢字変換モデルの選定（2026-10-03）
+# かな漢字変換モデル
+
+## 現在のモデル（2026-10-04）
+
+通常の設定例と直近の速度計測は**jinen-v2-xsmall / Q5_K_M**を使用する。ファイルは28,261,056 bytes（約28.3MB）。利用者環境のファイルのSHA256が[配布元の固定コミット](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/commit/b91eac974998a37423ca8a1198fd7c5631b06e57)と一致することを確認した。
+
+```cmd
+.\.venv\Scripts\hf.exe download togatogah/jinen-v2-xsmall.gguf jinen-v2-xsmall-Q5_K_M.gguf --revision b91eac974998a37423ca8a1198fd7c5631b06e57 --local-dir models
+```
+
+```toml
+model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
+model_format = "jinen_v2"
+```
+
+SHA256: `24ff3af5db712fbbb4aa9254ee28ec4d731207134471ab68b06c1828726284c2`。
+
+v2はNFKC正規化を前提とする。`jinen_v2`形式では左文脈とカタカナの読みからプロンプトを組み立て、全体をNFKC正規化し、temperature=0・top_k=1で生成する。正規化はモデル入力だけに適用し、対象外の元の本文は保持する。[作者のモデルカード](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/blob/b91eac974998a37423ca8a1198fd7c5631b06e57/README.md)
+
+## 過去の候補調査（2026-10-03）
+
+以下の第一候補・公開状況・評価は調査当時の記録。現在のセットアップは上記のv2-xsmallを使う。
 
 第一候補は**jinen-v1-xsmall / Q5_K_M**。左文脈を専用トークンで渡す小型の変換専用モデルです。公開済みGGUFは31,178,432 bytes（約31.2MB）。現在のmainにはGGUFが見当たらないため、GGUF追加コミット`6ec3b6ae261939271c6bd0b9385553ee0ae0a93c`を指定します。
 
