@@ -6,7 +6,7 @@ from .editor import TextState
 from .direct_win32 import check_input_ready, unicode_events, window_identity, input_tick, class_name
 from .winapi import send
 from .ime import ImeSession
-from .timing import stage
+from .timing import stage, logger as timing_logger
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ class Automation:
 
 class AutomationEditor:
     kind = "uia"
+    validates_before_replace = True
 
     def __init__(self, automation, focused, element, pattern, config, initial_state=None):
         self.automation = automation
@@ -92,6 +93,7 @@ class AutomationEditor:
         self.runtime_id = tuple(focused.GetRuntimeId())
         self.limit = config.max_document_chars
         self.timeout = min(config.editor_timeout_seconds, 2)
+        self.readback_initial_delay = config.uia_readback_initial_delay_ms / 1000
         self.window = window_identity()
         self.ime_check = config.uia_ime_check
         self.ime_session_factory = ImeSession
@@ -132,6 +134,10 @@ class AutomationEditor:
             raise RuntimeError("読み取り専用の入力欄です")
         if self.ime_check == "off":
             logger.debug("IME判定: uia_ime_check=offのため照会を省略")
+            return
+        # In auto mode Chromium's cached composition is advisory only.
+        # Keep the diagnostic when requested, without querying it on the hot path.
+        if self.ime_check == "auto" and self.chromium and not logger.isEnabledFor(logging.DEBUG):
             return
         composing = self.automation.pattern(self.element, "TextEditPattern")
         if composing is not None:
@@ -276,8 +282,16 @@ class AutomationEditor:
         """
         probes = confirmations = 0
         probe_seconds = confirmation_seconds = sleep_seconds = 0.0
+        wait_started = time.perf_counter()
         last_length = None
         try:
+            initial_delay = getattr(self, "readback_initial_delay", 0)
+            if initial_delay:
+                self.check_focus()
+                delay = min(initial_delay, max(0, deadline - time.monotonic()))
+                started = time.perf_counter()
+                time.sleep(delay)
+                sleep_seconds += time.perf_counter() - started
             while True:
                 started = time.perf_counter()
                 self.check_focus()
@@ -311,9 +325,11 @@ class AutomationEditor:
                 time.sleep(delay)
                 sleep_seconds += time.perf_counter() - started
         finally:
-            logger.debug("反映待ち内訳: 本文照会=%s回/%.1fms / 最終確認=%s回/%.1fms / 休止=%.1fms",
+            total = time.perf_counter() - wait_started
+            timing_logger.debug("反映待ち内訳: 本文照会=%s回/%.1fms / 最終確認=%s回/%.1fms / 休止=%.1fms / その他=%.1fms",
                          probes, probe_seconds * 1000, confirmations, confirmation_seconds * 1000,
-                         sleep_seconds * 1000)
+                         sleep_seconds * 1000,
+                         max(0, total - probe_seconds - confirmation_seconds - sleep_seconds) * 1000)
 
     def point(self, document, text, offset):
         # UIA Character units can differ from Python code points. Move in bulk,
@@ -414,13 +430,12 @@ class AutomationEditor:
             deadline = time.monotonic() + self.timeout
             wanted = TextState(state.text, start, end)
             while True:
-                self.check_focus()
                 if input_tick() != before_tick:
                     raise RuntimeError("選択の反映待ちに操作があったため中止しました")
                 # Different provider anchors can represent the same textual
                 # boundary. Verify freshly read text and offsets, rather than
                 # equating raw range endpoints from separate COM objects.
-                actual = self.read()
+                actual = self.read()  # checks focus before and after the snapshot
                 if actual == wanted:
                     break
                 if actual.text != state.text:

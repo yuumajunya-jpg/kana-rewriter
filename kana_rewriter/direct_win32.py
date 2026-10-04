@@ -103,6 +103,7 @@ def unicode_events(text):
 
 
 class NativeEditor:
+    validates_before_replace = True
     kind = "win32"
 
     def __init__(self, hwnd, config):

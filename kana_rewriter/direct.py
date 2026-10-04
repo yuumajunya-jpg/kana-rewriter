@@ -5,7 +5,7 @@ import time
 import sys
 
 from .editor import TextState, make_capture, replacement_plan
-from .timing import stage
+from .timing import stage, DeferredHandler
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +106,12 @@ class EditorEngine:
         wait_input_release(target, self.trigger_keys)
         if window_identity() != target:
             raise RuntimeError("待機中に入力先が変わったため中止しました")
-        with stage("適用/推論後の本文・位置再確認"):
-            if editor.read() != state:
-                raise RuntimeError("待機中に本文または選択位置が変わったため中止しました")
+        # Built-in backends validate the snapshot immediately before selecting.
+        # Other backends keep the engine-side check unless they opt in explicitly.
+        if getattr(editor, "validates_before_replace", False) is not True:
+            with stage("適用/推論後の本文・位置再確認"):
+                if editor.read() != state:
+                    raise RuntimeError("待機中に本文または選択位置が変わったため中止しました")
         # Activity during inference is harmless when the editor state is still
         # identical. Keep a fresh activity guard for the short mutation phase.
         tick = input_tick()
@@ -180,10 +183,13 @@ class EditorEngine:
         return report
 
 
-def _worker(connection, config, debug):
-    if debug:
-        logging.basicConfig(level=logging.DEBUG, format="[診断] %(message)s")
-        logging.getLogger("comtypes").setLevel(logging.WARNING)
+def _worker(connection, config, debug, timings=False):
+    diagnostics = DeferredHandler()
+    logging.basicConfig(level=logging.DEBUG if debug else logging.WARNING,
+                        handlers=[diagnostics], force=True)
+    logging.getLogger("comtypes").setLevel(logging.WARNING)
+    if timings:
+        logging.getLogger("kana_rewriter.timing").setLevel(logging.DEBUG)
     engine = EditorEngine(config)
     try:
         while True:
@@ -191,9 +197,10 @@ def _worker(connection, config, debug):
             if method == "close":
                 break
             try:
-                connection.send((True, getattr(engine, method)(*args)))
+                result = (True, getattr(engine, method)(*args))
             except Exception as exc:
-                connection.send((False, str(exc)))
+                result = (False, str(exc))
+            connection.send((*result, diagnostics.export()))
     except (EOFError, BrokenPipeError):
         pass
     finally:
@@ -203,9 +210,10 @@ def _worker(connection, config, debug):
 
 
 class Desktop:
-    def __init__(self, config, debug=False):
+    def __init__(self, config, debug=False, timings=False):
         self.config = config
         self.debug = debug
+        self.timings = timings
         self.process = None
         self.connection = None
         self.failed = False
@@ -213,7 +221,7 @@ class Desktop:
     def _start(self):
         context = multiprocessing.get_context("spawn")
         self.connection, child = context.Pipe()
-        self.process = context.Process(target=_worker, args=(child, self.config, self.debug), daemon=True)
+        self.process = context.Process(target=_worker, args=(child, self.config, self.debug, self.timings), daemon=True)
         self.process.start()
         child.close()
 
@@ -227,11 +235,13 @@ class Desktop:
             self.connection.send((method, args))
             if not self.connection.poll(self.config.editor_timeout_seconds + 3):
                 raise TimeoutError()
-            success, result = self.connection.recv()
+            success, result, diagnostics = self.connection.recv()
         except (EOFError, BrokenPipeError, OSError, TimeoutError) as exc:
             self.failed = True
             self.close()
             raise RuntimeError("編集ワーカーの応答を確認できません。編集は再送しません。本文を確認して再起動してください") from exc
+        for packet in diagnostics:
+            logging.getLogger(packet["name"]).handle(logging.makeLogRecord(packet))
         if not success:
             raise RuntimeError(result)
         return result

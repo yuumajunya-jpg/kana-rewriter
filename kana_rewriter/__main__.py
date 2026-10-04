@@ -8,7 +8,7 @@ import json
 
 from .core import Config, Converter, apply_result
 from .hotkeys import parse_hotkey
-from .timing import stage
+from .timing import stage, buffered_logs, flush_logs
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,16 @@ def main():
     parser.add_argument("--left-context", default="", help="--textの左文脈")
     parser.add_argument("--right-context", default="", help="--textの右文脈")
     parser.add_argument("--debug", action="store_true", help="変換対象・文脈・モデル出力・編集方式を端末に表示")
+    parser.add_argument("--timings", action="store_true", help="本文を表示せず、編集完了後に工程時間を表示")
     parser.add_argument("--inspect", action="store_true", help="3秒後の入力欄の直接編集能力を表示（文字変更なし）")
     args = parser.parse_args()
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format="[診断] %(message)s")
+    elif args.timings:
+        logging.basicConfig(level=logging.WARNING, format="[診断] %(message)s")
+    if args.timings:
+        logging.getLogger("kana_rewriter.timing").setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
     try:
         config = Config.load(args.config) if args.config else Config()
         converter = Converter(config)
@@ -40,7 +46,7 @@ def main():
             from .direct import Desktop
             print("3秒以内に診断する入力欄へフォーカスを移してください", flush=True)
             time.sleep(3)
-            desktop = Desktop(config, debug=args.debug)
+            desktop = Desktop(config, debug=args.debug, timings=args.timings)
             try:
                 print(json.dumps(desktop.inspect(), ensure_ascii=False, indent=2))
             finally:
@@ -54,13 +60,14 @@ def main():
         if config.backend == "llama_cpp":
             print("GGUFモデルを読み込んでいます…", flush=True)
             converter.load_model()
-        return run_windows(converter, config, debug=args.debug)
+        return run_windows(converter, config, debug=args.debug, timings=args.timings)
     except Exception as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return 1
 
 
-def run_windows(converter, config, debug=False):
+@buffered_logs()
+def run_windows(converter, config, debug=False, timings=False):
     from .winapi import user, W, MessageWaiter
     bindings = {1: parse_hotkey(config.hotkey_line), 2: parse_hotkey(config.hotkey_selection)}
     if config.hotkey_quit:
@@ -76,7 +83,7 @@ def run_windows(converter, config, debug=False):
                           trailing_punctuation=config.trailing_punctuation)
     else:
         from .direct import Desktop
-        desktop = Desktop(config, debug=debug)
+        desktop = Desktop(config, debug=debug, timings=timings)
     try:
         waiter = MessageWaiter()
         for ident, binding in bindings.items():
@@ -85,6 +92,7 @@ def run_windows(converter, config, debug=False):
             registered.append(ident)
         if config.edit_backend != "clipboard":
             desktop.warmup()
+        flush_logs()
         quit_label = f" / {bindings[3].label} = 終了" if 3 in bindings else ""
         print(f"起動: {bindings[1].label} = カーソル左の区切りまで / "
               f"{bindings[2].label} = 選択範囲{quit_label} / この端末でCtrl+C = 終了", flush=True)
@@ -105,6 +113,7 @@ def run_windows(converter, config, debug=False):
                         future.add_done_callback(waiter.wake)
                         print("変換中…", flush=True)
                     except Exception as exc:
+                        flush_logs()
                         print(f"中止: {exc}", flush=True)
             if pending is not None and pending[0].done():
                 future, captured, started, capture_seconds = pending
@@ -119,8 +128,10 @@ def run_windows(converter, config, debug=False):
                                  (finished - applying) * 1000,
                                  (finished - started - inference_seconds) * 1000,
                                  (finished - started) * 1000)
+                    flush_logs()
                     print("差し替え処理を実行しました" if changed else "変換の必要はありません", flush=True)
                 except Exception as exc:
+                    flush_logs()
                     print(f"中止: {exc}", flush=True)
             waiter.wait()
     except KeyboardInterrupt:

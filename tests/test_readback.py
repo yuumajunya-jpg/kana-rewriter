@@ -23,13 +23,26 @@ class ReadbackTests(unittest.TestCase):
         editor.read_once.return_value = expected
         with patch("kana_rewriter.direct_uia.time.monotonic", return_value=0), \
                 patch("kana_rewriter.direct_uia.time.sleep") as sleep, \
-                self.assertLogs("kana_rewriter.direct_uia", level="DEBUG") as logs:
+                self.assertLogs("kana_rewriter", level="DEBUG") as logs:
             self.assertEqual(editor.wait_for_state(expected, 2), expected)
         editor.read_once.assert_called_once()
         self.assertEqual(editor.get_text.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
-        self.assertIn("本文照会=3回", logs.output[-1])
-        self.assertIn("最終確認=1回", logs.output[-1])
+        self.assertTrue(any("本文照会=3回" in line and "最終確認=1回" in line
+                            and "その他=" in line for line in logs.output))
+
+    def test_initial_delay_is_bounded_and_does_not_replace_validation(self):
+        editor = self.prepare()
+        editor.readback_initial_delay = 0.02
+        expected = TextState("散歩", 2, 2)
+        editor.get_text.return_value = expected.text
+        editor.read_once.return_value = expected
+        with patch("kana_rewriter.direct_uia.time.monotonic", return_value=1.99), \
+                patch("kana_rewriter.direct_uia.time.sleep") as sleep:
+            self.assertEqual(editor.wait_for_state(expected, 2), expected)
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.01)
+        editor.read_once.assert_called_once()
+        self.assertGreaterEqual(editor.check_focus.call_count, 2)
 
     def test_matching_text_still_requires_matching_selection_and_fresh_snapshot(self):
         from kana_rewriter.direct_uia import SnapshotPending

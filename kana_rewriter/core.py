@@ -38,8 +38,12 @@ class Config:
     uia_ime_check: str = "auto"
     editor_timeout_seconds: float = 5
     max_document_chars: int = 200000
+    uia_readback_initial_delay_ms: int = 0
 
     def __post_init__(self):
+        if (type(self.uia_readback_initial_delay_ms) is not int
+                or not 0 <= self.uia_readback_initial_delay_ms <= 100):
+            raise ValueError("uia_readback_initial_delay_msは0〜100の整数です")
         if self.uia_ime_check not in {"auto", "strict", "off"}:
             raise ValueError("uia_ime_checkはauto・strict・offです")
         if self.edit_backend not in {"auto", "win32", "uia", "clipboard"}:

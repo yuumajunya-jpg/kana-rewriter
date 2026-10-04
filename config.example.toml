@@ -11,6 +11,7 @@ hotkey_selection = "Ctrl+Shift+Enter" # 選択範囲を変換
 hotkey_quit = "" # 任意の終了キー。例: "Ctrl+Alt+Q"。空文字列なら登録しない
 edit_backend = "auto" # auto: 標準Edit/RichEditはWin32、それ以外はUIA。clipboardで旧方式
 uia_ime_check = "auto" # Chromiumの残存範囲は中止判定に使わない。strictは厳密判定、offは照会なし
+uia_readback_initial_delay_ms = 0 # 比較用: 送信後の初回照会まで0〜100ms。まず0と10で比較
 editor_timeout_seconds = 5 # 編集APIの応答待機。応答不明時は再送しない
 max_document_chars = 200000 # 本文取得の上限。超えた入力欄は中止
 n_ctx = 0 # GGUFの学習時のコンテキスト長を使用
