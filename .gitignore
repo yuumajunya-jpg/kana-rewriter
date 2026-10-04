@@ -7,3 +7,7 @@ dist/
 config.toml
 *.gguf
 models/
+*.log
+.env
+.env.*
+!.env.example

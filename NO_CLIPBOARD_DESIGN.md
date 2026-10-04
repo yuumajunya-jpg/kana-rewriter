@@ -1,5 +1,7 @@
 # クリップボードを使わない版の検討
 
+> 過去の設計記録: 以下の方針・未検証の記述は各調査時点の状態。現在の使い方は[README](README.md)、編集仕様は[詳細資料](docs/EDITOR_DETAILS.md)、直近の手動試行は[Python比較](PYTHON_EDITOR_COMPARISON.md)を参照。
+
 調査日: 2026-10-03。以下は調査時の設計資料。`feature/no-clipboard`で併用方式を実装した。使用方法と現在の対応範囲はREADMEを参照。
 
 実装は`edit_backend = "auto"`を既定とし、標準Edit/RichEditではWin32、それ以外ではUIAの取得・SelectとSendInputを使う。UIA/Win32の編集ワーカーは別プロセスに分離し、タイムアウト時に編集を再送しない。`--inspect`でモデルを読み込まずに入力欄の能力を確認できる。旧方式は`clipboard`の明示指定で利用できる。

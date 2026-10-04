@@ -12,7 +12,7 @@ hotkey_quit = "" # 任意の終了キー。例: "Ctrl+Alt+Q"。空文字列な�
 edit_backend = "auto" # auto: 標準Edit/RichEditはWin32、それ以外はUIA。clipboardで旧方式
 editor_worker = "python" # C++版をビルドして比較する場合は "native"。推論バックエンドとは独立
 # native_worker_path = "build/native/kana-editor-worker.exe" # この設定ファイルからの相対パス
-native_uia_wait = "poll" # C++版のみ。"event"でTextChanged通知＋期限付き照会を比較（実験用）
+native_uia_wait = "poll" # C++版のみ。event方式の比較記録はNATIVE_EDITOR.md参照。通常はpoll
 uia_ime_check = "auto" # Chromiumの残存範囲は中止判定に使わない。strictは厳密判定、offは照会なし
 uia_readback_initial_delay_ms = 0 # 比較用: 送信後の初回照会まで0〜100ms。まず0と10で比較
 editor_timeout_seconds = 5 # 編集APIの応答待機。応答不明時は再送しない
@@ -34,6 +34,6 @@ model = "local"
 timeout_seconds = 30 # HTTPの場合のみ。直接推論の時間制限ではありません
 max_chars = 1000
 max_tokens = 256
-paste_wait_seconds = 0.1 # ブラウザー等へCtrl+Vを送った後のクリップボード復元待機
+paste_wait_seconds = 0.1 # edit_backend = "clipboard" の場合だけ使う復元待機
 # 認証が必要な場合、キーを格納した環境変数名を指定
 api_key_env = "KANA_REWRITER_API_KEY"

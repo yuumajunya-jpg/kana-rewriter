@@ -37,6 +37,18 @@ Python UIAは旧版より約21.2%短縮した。最適化PythonとC++の差は�
 .\.venv\Scripts\python.exe -c "from pathlib import Path; import subprocess; p=Path('build/python-baseline/direct_uia.py'); p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(subprocess.check_output(['git','show','a5897e075d016c321f7b482857f061ce49ae2f96:kana_rewriter/direct_uia.py']))"
 ```
 
+## 実ブラウザーでのPython手動試行（2026-10-04）
+
+同じ利用者環境でAIあり・`--editor-worker python --timings`を起動し、3回の置換成功ログを確認した。入力欄での見た目・復元位置は利用者が確認する手動試行であり、自動試験とは別。
+
+| 回 | 取得 | AI | 適用 | AI以外 | 合計 |
+|---|---:|---:|---:|---:|---:|
+| 初回 | 47.1ms | 121.1ms | 96.1ms | 144.5ms | 265.6ms |
+| 2回目 | 12.1ms | 69.6ms | 100.1ms | 112.5ms | 182.1ms |
+| 3回目 | 13.1ms | 69.0ms | 106.3ms | 119.6ms | 188.7ms |
+
+全試行でキー解放待ちは0ms、句読点後の一括カーソル移動が使われた。入力反映確認は60.2 / 68.7 / 74.3msだった。初回を除くAI以外は平均116.1ms。以前のC++ログと同程度だが、試行数・入力・測定順を揃えた比較ではないため、差の有意性や優劣は判断しない。通常利用はPython版とし、C++移行はいったん終了した。
+
 ## 実際のブラウザーでAIなし比較
 
 通常のホットキー・取得・ワーカー通信・置換・反映確認を通す。AIモデルは読み込まず、指定した対象に完全一致した場合だけ固定結果に置換する。空の対象・結果は不可。異なる対象は送信前に中止する。以下はcmd用:
