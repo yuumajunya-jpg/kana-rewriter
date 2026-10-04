@@ -252,6 +252,14 @@ void self_test() {
     auto before_wait = Clock::now();
     timer.wait(2);
     require(Clock::now() - before_wait >= std::chrono::milliseconds(2), "Polling timer returned early");
+    auto notification_signal = std::make_shared<EventSignal>();
+    require(notification_signal->event != nullptr, "Cannot create notification test signal");
+    Com<IUIAutomationEventHandler> notification_handler(new TextChanged(notification_signal));
+    hr(notification_handler->HandleAutomationEvent(nullptr, UIA_Text_TextChangedEventId), "Notification handler failed");
+    require(notification_signal->notifications.load() == 1 &&
+            WaitForSingleObject(notification_signal->event, 0) == WAIT_OBJECT_0 &&
+            WaitForSingleObject(notification_signal->event, 0) == WAIT_TIMEOUT,
+            "Notification was not counted or auto-reset");
     Writer encoded; encoded.number(0x123456789abcdef0ULL); encoded.text(utf8(text));
     Reader decoded{encoded.data};
     require(decoded.number() == 0x123456789abcdef0ULL && decoded.text() == utf8(text), "Protocol roundtrip");
@@ -324,6 +332,9 @@ void self_test() {
             };
             require(metric("count:uia_readback_probes") >= 1 && metric("count:uia_readback_confirmed") == 1 &&
                     metric("count:uia_readback_text_seen") == 1, "Successful readback counts");
+            require(metric("count:uia_readback_event_mode") == 1 &&
+                    metric("count:uia_readback_event_subscribed") <= 1,
+                    "Notification mode diagnostics missing");
             require(metric("uia_readback_first_text_match") <= metric("uia_readback_confirmed"), "Readback milestone order");
             require(notified.probe_checks == metric("count:uia_readback_probes") && notified.full_checks == 2,
                     "Stale probes performed full UIA focus checks or final checks were omitted");

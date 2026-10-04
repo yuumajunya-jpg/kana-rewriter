@@ -66,6 +66,7 @@ inline std::wstring bstr(BSTR value) {
 struct Pending : std::runtime_error { using std::runtime_error::runtime_error; };
 struct EventSignal {
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    std::atomic<uint64_t> notifications{0};
     ~EventSignal() { if (event) CloseHandle(event); }
 };
 class TextChanged final : public IUIAutomationEventHandler {
@@ -84,6 +85,7 @@ public:
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { auto count = --refs_; if (!count) delete this; return count; }
     HRESULT STDMETHODCALLTYPE HandleAutomationEvent(IUIAutomationElement*, EVENTID) override {
+        ++signal_->notifications;
         SetEvent(signal_->event); return S_OK;
     }
 };
@@ -321,6 +323,7 @@ public:
                     provider.first == L"chromium" || starts(window_class(target.focus), L"chrome_");
         writable(&initial_safety);
         if (config.wait == "event") {
+            Stage subscription("uia_event_subscribe");
             signal_ = std::make_shared<EventSignal>();
             require(signal_->event != nullptr, "Cannot create UIA notification event");
             handler_ = Com<IUIAutomationEventHandler>(new TextChanged(signal_));
@@ -329,7 +332,10 @@ public:
         }
     }
     ~UiaEditor() override {
-        if (subscribed_) automation_.client->RemoveAutomationEventHandler(UIA_Text_TextChangedEventId, element_.get(), handler_.get());
+        if (subscribed_) {
+            Stage subscription("uia_event_unsubscribe");
+            automation_.client->RemoveAutomationEventHandler(UIA_Text_TextChangedEventId, element_.get(), handler_.get());
+        }
         try { finish(); } catch (...) {}
     }
     const char* kind() const override { return "uia"; }
@@ -455,6 +461,16 @@ public:
     State wait(const State& expected, Deadline deadline) override {
         Stage timing("uia_readback");
         ReadbackMetrics metrics;
+        metrics.event_mode = config_.wait == "event";
+        metrics.event_subscribed = subscribed_;
+        struct EventCount {
+            ReadbackMetrics& metrics;
+            std::shared_ptr<EventSignal> signal;
+            uint64_t before;
+            ~EventCount() {
+                if (metrics.enabled && signal) metrics.event_notifications = signal->notifications.load() - before;
+            }
+        } event_count{metrics, signal_, metrics.enabled && signal_ ? signal_->notifications.load() : 0};
         if (config_.initial_delay_ms) {
             { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); probe_focus(); }
             { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::PollWait); pause(DWORD(config_.initial_delay_ms)); }

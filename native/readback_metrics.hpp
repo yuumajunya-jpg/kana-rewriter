@@ -10,6 +10,8 @@ public:
     enum Phase { Focus, TextQuery, StateCheck, PollWait, PhaseCount };
     bool enabled = measure;
     uint64_t probes = 0, text_misses = 0, caret_misses = 0, unstable = 0;
+    bool event_mode = false, event_subscribed = false;
+    uint64_t event_notifications = 0;
 private:
     Deadline start_ = enabled ? Clock::now() : Deadline{};
     std::array<Clock::duration, PhaseCount> phases_{};
@@ -53,6 +55,9 @@ public:
         timings.push_back({"count:uia_readback_unstable", unstable});
         timings.push_back({"count:uia_readback_text_seen", text_seen_});
         timings.push_back({"count:uia_readback_confirmed", confirmed_});
+        timings.push_back({"count:uia_readback_event_mode", event_mode});
+        timings.push_back({"count:uia_readback_event_subscribed", event_subscribed});
+        timings.push_back({"count:uia_readback_event_notifications", event_notifications});
     }
 };
 } // namespace kana
