@@ -19,6 +19,17 @@ def normalize(text):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def property_values(automation, element, names):
+    """Fetch a fresh element-only snapshot; cache requests, never live values."""
+    try:
+        cached = element.BuildUpdatedCache(automation.cache_request(names))
+        return {name: getattr(cached, "Cached" + name) for name in names}
+    except Exception:
+        # Keep providers without a usable cache on the original live path.
+        logger.debug("UIA属性一括取得不可: 個別取得へ切り替え", exc_info=True)
+        return {name: getattr(element, "Current" + name) for name in names}
+
+
 class Automation:
     def __init__(self):
         import sys
@@ -31,6 +42,17 @@ class Automation:
         self.types = comtypes.client.GetModule("UIAutomationCore.dll")
         self.client = comtypes.client.CreateObject(self.types.CUIAutomation,
                                                    interface=self.types.IUIAutomation)
+        self.cache_requests = {}
+
+    def cache_request(self, names):
+        key = tuple(names)
+        if key not in self.cache_requests:
+            request = self.client.CreateCacheRequest()
+            request.TreeScope = self.types.TreeScope_Element
+            for name in key:
+                request.AddProperty(getattr(self.types, "UIA_" + name + "PropertyId"))
+            self.cache_requests[key] = request
+        return self.cache_requests[key]
 
     def pattern(self, element, name):
         types = self.types
@@ -42,14 +64,17 @@ class Automation:
 
     def focused_editor(self, config):
         focused = self.client.GetFocusedElement()
-        if not focused or focused.CurrentIsPassword or not focused.CurrentIsEnabled:
+        if not focused:
+            raise RuntimeError("入力先を取得できません")
+        state = property_values(self, focused, ("IsPassword", "IsEnabled", "HasKeyboardFocus"))
+        if state["IsPassword"] or not state["IsEnabled"]:
             raise RuntimeError("入力先を取得できないか、パスワード・無効な入力欄です")
         element = focused
         # A focused text child can expose TextPattern on its editable ancestor.
         for _ in range(8):
             pattern = self.pattern(element, "TextPattern")
             if pattern is not None:
-                return AutomationEditor(self, focused, element, pattern, config)
+                return AutomationEditor(self, focused, element, pattern, config, initial_state=state)
             element = self.client.ControlViewWalker.GetParentElement(element)
             if not element:
                 break
@@ -59,7 +84,7 @@ class Automation:
 class AutomationEditor:
     kind = "uia"
 
-    def __init__(self, automation, focused, element, pattern, config):
+    def __init__(self, automation, focused, element, pattern, config, initial_state=None):
         self.automation = automation
         self.focused = focused
         self.element = element
@@ -70,26 +95,34 @@ class AutomationEditor:
         self.window = window_identity()
         self.ime_check = config.uia_ime_check
         self.ime_session_factory = ImeSession
-        frameworks = {str(focused.CurrentFrameworkId).casefold(),
-                      str(element.CurrentFrameworkId).casefold()}
+        names = ("FrameworkId", "ClassName")
+        if logger.isEnabledFor(logging.DEBUG):
+            names += ("ControlType",)
+        metadata = property_values(automation, focused, names)
+        provider = metadata if element is focused else property_values(
+            automation, element, ("FrameworkId", "ClassName"))
+        self.focused_class = metadata["ClassName"]
+        frameworks = {str(metadata["FrameworkId"]).casefold(), str(provider["FrameworkId"]).casefold()}
         self.chromium = bool(frameworks & {"chrome", "chromium"}) or class_name(
             self.window[1]).startswith("chrome_")
         logger.debug("UIA入力欄: framework=%s / Chromium=%s / uia_ime_check=%s",
                      sorted(frameworks), self.chromium, self.ime_check)
-        logger.debug("UIA要素: focused class=%r / control=%s / name=%r / provider class=%r",
-                     focused.CurrentClassName, focused.CurrentControlType,
-                     focused.CurrentName, element.CurrentClassName)
-        self.check_writable()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("UIA要素: focused class=%r / control=%s / provider class=%r",
+                         metadata["ClassName"], metadata["ControlType"], provider["ClassName"])
+        self.check_writable(initial_state)
 
     def check_focus(self):
         current = self.automation.client.GetFocusedElement()
         if window_identity() != self.window or tuple(current.GetRuntimeId()) != self.runtime_id:
             raise RuntimeError("入力先が変わったため中止しました")
 
-    def check_writable(self):
-        if self.focused.CurrentIsPassword or not self.focused.CurrentIsEnabled:
+    def check_writable(self, initial_state=None):
+        state = initial_state if initial_state is not None else property_values(
+            self.automation, self.focused, ("IsPassword", "IsEnabled", "HasKeyboardFocus"))
+        if state["IsPassword"] or not state["IsEnabled"]:
             raise RuntimeError("パスワード・無効な入力欄は対象外です")
-        if not self.focused.CurrentHasKeyboardFocus:
+        if not state["HasKeyboardFocus"]:
             raise RuntimeError("入力欄にキーボードフォーカスがありません")
         value = self.automation.pattern(self.element, "ValuePattern")
         if value is not None and value.CurrentIsReadOnly:
@@ -195,7 +228,10 @@ class AutomationEditor:
         document = self.pattern.DocumentRange
         text = self.get_text(document)
         focused = getattr(self, "focused", None)
-        if (focused is not None and focused.CurrentClassName == "native-edit-context"
+        focused_class = getattr(self, "focused_class", None)
+        if focused_class is None and focused is not None:
+            focused_class = focused.CurrentClassName
+        if (focused is not None and focused_class == "native-edit-context"
                 and text and text == normalize(focused.CurrentName)):
             logger.debug("UIA本文取得不可: native-edit-contextがエディター本文ではなく案内ラベルを公開")
             raise RuntimeError("VS Code/Monacoがエディター本文をUIAに公開していません。"
