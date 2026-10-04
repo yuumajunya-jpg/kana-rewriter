@@ -300,6 +300,14 @@ class UiaEditor : public Editor {
     void pause(DWORD milliseconds) {
         poll_pause(milliseconds, subscribed_ ? signal_->event : nullptr);
     }
+protected:
+    virtual void probe_focus() {
+        // No input or selection changes occur during readback. Check native
+        // foreground/focus on every probe; verify the precise UIA element
+        // before and after accepting a matching document instead of querying
+        // the browser's focused accessibility element for every stale probe.
+        Editor::focus();
+    }
 public:
     UiaEditor(const Identity& target, const Config& config, Activity& activity, Automation& automation,
               Com<IUIAutomationElement> focused, Com<IUIAutomationElement> element, Com<IUIAutomationTextPattern> text_pattern,
@@ -448,13 +456,13 @@ public:
         Stage timing("uia_readback");
         ReadbackMetrics metrics;
         if (config_.initial_delay_ms) {
-            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); focus(); }
+            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); probe_focus(); }
             { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::PollWait); pause(DWORD(config_.initial_delay_ms)); }
         }
         size_t probes = 0;
         while (true) {
             if (metrics.enabled) ++metrics.probes;
-            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); focus(); }
+            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); probe_focus(); }
             try {
                 Com<IUIAutomationTextRange> doc;
                 std::wstring text;
@@ -464,6 +472,7 @@ public:
                 }
                 if (text == expected.text) {
                     metrics.text_match();
+                    { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); focus(); }
                     State actual;
                     {
                         ReadbackMetrics::Slice part(metrics, ReadbackMetrics::StateCheck);

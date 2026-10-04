@@ -163,8 +163,18 @@ public:
 class FixtureUia : public UiaEditor {
 public:
     using UiaEditor::UiaEditor;
+    size_t full_checks = 0, probe_checks = 0, reject_full_at = 0;
+    bool reject_probe = false;
     void focus() override {
+        ++full_checks;
         require(IsWindow(target_.focus) && !IsWindowVisible(target_.focus), "Self-test fixture is not hidden");
+        require(!reject_full_at || full_checks != reject_full_at, "Simulated UIA focus change");
+    }
+protected:
+    void probe_focus() override {
+        ++probe_checks;
+        require(IsWindow(target_.focus) && !IsWindowVisible(target_.focus), "Self-test fixture is not hidden");
+        require(!reject_probe, "Simulated native focus change");
     }
 };
 class FixtureWin32 : public Win32Editor {
@@ -315,6 +325,8 @@ void self_test() {
             require(metric("count:uia_readback_probes") >= 1 && metric("count:uia_readback_confirmed") == 1 &&
                     metric("count:uia_readback_text_seen") == 1, "Successful readback counts");
             require(metric("uia_readback_first_text_match") <= metric("uia_readback_confirmed"), "Readback milestone order");
+            require(notified.probe_checks == metric("count:uia_readback_probes") && notified.full_checks == 2,
+                    "Stale probes performed full UIA focus checks or final checks were omitted");
             auto partition = metric("uia_readback_focus") + metric("uia_readback_text_query") +
                              metric("uia_readback_state_check") + metric("uia_readback_poll_wait") + metric("uia_readback_other");
             require(partition <= metric("uia_readback"), "Readback phases overlap");
@@ -326,6 +338,24 @@ void self_test() {
             catch (...) { rejected = true; }
             require(rejected && metric("count:uia_readback_caret_misses") >= 1 &&
                     metric("count:uia_readback_confirmed") == 0, "Wrong caret accepted or failure metrics lost");
+            for (size_t changed_focus_at : {size_t(1), size_t(2)}) {
+                notified.full_checks = notified.probe_checks = 0;
+                notified.reject_full_at = changed_focus_at;
+                timings.clear(); rejected = false;
+                try { notified.wait({changed, 0, 0}, Clock::now() + std::chrono::seconds(2)); }
+                catch (...) { rejected = true; }
+                require(rejected && metric("count:uia_readback_confirmed") == 0 &&
+                        notified.full_checks == changed_focus_at, "UIA focus change was accepted");
+            }
+            notified.reject_full_at = 0;
+            notified.reject_probe = true;
+            notified.full_checks = notified.probe_checks = 0;
+            timings.clear(); rejected = false;
+            try { notified.wait({changed, 0, 0}, Clock::now() + std::chrono::seconds(2)); }
+            catch (...) { rejected = true; }
+            require(rejected && notified.probe_checks == 1 && notified.full_checks == 0 &&
+                    metric("count:uia_readback_confirmed") == 0, "Native focus change did not stop readback");
+            notified.reject_probe = false;
             measure = false;
             timings.clear();
             notified.wait({changed, 0, 0}, Clock::now() + std::chrono::seconds(2));
