@@ -4,6 +4,8 @@ import logging
 
 from .editor import TextState
 from .direct_win32 import check_input_ready, unicode_events, window_identity, input_tick, class_name
+from .winapi import KeyboardInput
+from .waiting import sleep as poll_sleep
 from .winapi import send
 from .ime import ImeSession
 from .timing import stage, logger as timing_logger
@@ -84,6 +86,7 @@ class Automation:
 class AutomationEditor:
     kind = "uia"
     validates_before_replace = True
+    positions_with_input = True
 
     def __init__(self, automation, focused, element, pattern, config, initial_state=None):
         self.automation = automation
@@ -117,6 +120,10 @@ class AutomationEditor:
     def check_focus(self):
         current = self.automation.client.GetFocusedElement()
         if window_identity() != self.window or tuple(current.GetRuntimeId()) != self.runtime_id:
+            raise RuntimeError("入力先が変わったため中止しました")
+
+    def check_probe_focus(self):
+        if window_identity() != self.window:
             raise RuntimeError("入力先が変わったため中止しました")
 
     def check_writable(self, initial_state=None):
@@ -159,10 +166,10 @@ class AutomationEditor:
     def get_text(self, range_):
         # Empty BSTRs can arrive as None. At document/line starts we also use
         # collapsed ranges to measure prefixes and construct insertion points.
-        if range_.CompareEndpoints(0, range_, 1) == 0:
-            return ""
         raw = range_.GetText(self.limit * 2 + 1)
         if raw is None:
+            if range_.CompareEndpoints(0, range_, 1) == 0:
+                return ""
             raise SnapshotPending("空ではないUIA文字範囲の本文を取得できません")
         text = normalize(raw)
         if len(text) > self.limit:
@@ -180,9 +187,11 @@ class AutomationEditor:
             raise RuntimeError("複数の選択範囲は未対応です")
         selected = ranges.GetElement(0) if ranges and ranges.Length == 1 else None
         if selected and selected.CompareEndpoints(0, selected, 1) != 0:
+            self.selection_empty = False
             self.selection_source = "GetSelection（選択範囲）"
             return selected
         # Some custom editors expose a placeholder collapsed selection at 0
+        self.selection_empty = True
         # even while the actual caret is elsewhere. Prefer the dedicated API
         # for an unselected caret, while keeping real selections for J mode.
         # Pattern support is stable for this captured editor. Cache even None
@@ -227,12 +236,9 @@ class AutomationEditor:
                 self.check_focus()
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f"UIAの本文・選択位置が整合する状態を確認できませんでした: {exc}") from exc
-                time.sleep(0.01)
+                poll_sleep(0.01)
 
-    def read_once(self):
-        self.check_focus()
-        document = self.pattern.DocumentRange
-        text = self.get_text(document)
+    def validate_label(self, text):
         focused = getattr(self, "focused", None)
         focused_class = getattr(self, "focused_class", None)
         if focused_class is None and focused is not None:
@@ -243,11 +249,19 @@ class AutomationEditor:
             raise RuntimeError("VS Code/Monacoがエディター本文をUIAに公開していません。"
                                "VS CodeでShift+Alt+F1を押してスクリーンリーダー最適化モードを有効にするか、"
                                '設定で"editor.accessibilitySupport": "on"にして再実行してください')
+
+    def read_once(self):
+        self.check_focus()
+        document = self.pattern.DocumentRange
+        text = self.get_text(document)
+        self.validate_label(text)
         selection = self.selection()
         prefix = document.Clone()
         prefix.MoveEndpointByRange(1, selection, 0)
         left = self.get_text(prefix)
-        collapsed = selection.CompareEndpoints(0, selection, 1) == 0
+        collapsed = getattr(self, "selection_empty", None)
+        if collapsed is None:
+            collapsed = selection.CompareEndpoints(0, selection, 1) == 0
         if collapsed:
             through_selection, selected = left, ""
         else:
@@ -273,6 +287,58 @@ class AutomationEditor:
         self.read_anchor = (state, selection)  # live; revalidated by range_for
         return state
 
+    @stage("UIA/期待状態専用確認")
+    def expected_once(self, expected, document=None):
+        if document is None:
+            document = self.pattern.DocumentRange
+            if self.get_text(document) != expected.text:
+                self.check_focus()
+                return "text_changed"
+        self.validate_label(expected.text)
+        if not 0 <= expected.start <= expected.end <= len(expected.text):
+            raise RuntimeError("期待する選択位置が不正です")
+        if expected.start != expected.end and hasattr(self.pattern, "GetSelection"):
+            ranges = self.pattern.GetSelection()
+            count = ranges.Length if ranges else 0
+            if count > 1:
+                raise RuntimeError("複数の選択範囲は未対応です")
+            selected = ranges.GetElement(0) if count == 1 else None
+            correct = bool(selected) and self.get_text(selected) == expected.text[expected.start:expected.end]
+        else:
+            selected = self.selection()
+            empty = getattr(self, "selection_empty", None)
+            if empty is None:
+                empty = selected.CompareEndpoints(0, selected, 1) == 0
+            correct = (empty if expected.start == expected.end else
+                       self.get_text(selected) == expected.text[expected.start:expected.end])
+        if correct:
+            prefix = document.Clone()
+            prefix.MoveEndpointByRange(1, selected, 0)
+            correct = self.get_text(prefix) == expected.text[:expected.start]
+            if correct and expected.start != expected.end:
+                prefix.MoveEndpointByRange(1, selected, 1)
+                correct = self.get_text(prefix) == expected.text[:expected.end]
+        if self.get_text(self.pattern.DocumentRange) != expected.text:
+            raise SnapshotPending("期待状態の確認中に本文が変更されました")
+        self.check_focus()
+        if not correct:
+            return "position_changed"
+        self.read_anchor = (expected, selected)
+        return "match"
+
+    def confirm_expected(self, expected, focus_checked=False):
+        if not focus_checked:
+            self.check_focus()
+        deadline = time.monotonic() + min(getattr(self, "timeout", 0.5), 0.5)
+        while True:
+            try:
+                return self.expected_once(expected)
+            except SnapshotPending:
+                self.check_focus()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("UIAの期待状態が整合する状態を確認できません")
+                poll_sleep(0.01)
+
     @stage("UIA/期待本文の反映待ちと最終確認")
     def wait_for_state(self, expected, deadline):
         """Avoid fetching selection/prefixes while Unicode input is incomplete.
@@ -287,16 +353,17 @@ class AutomationEditor:
         try:
             initial_delay = getattr(self, "readback_initial_delay", 0)
             if initial_delay:
-                self.check_focus()
+                self.check_probe_focus()
                 delay = min(initial_delay, max(0, deadline - time.monotonic()))
                 started = time.perf_counter()
-                time.sleep(delay)
+                poll_sleep(delay)
                 sleep_seconds += time.perf_counter() - started
             while True:
                 started = time.perf_counter()
-                self.check_focus()
+                self.check_probe_focus()
                 try:
-                    text = self.get_text(self.pattern.DocumentRange)
+                    document = self.pattern.DocumentRange
+                    text = self.get_text(document)
                 except SnapshotPending:
                     text = None
                 probes += 1
@@ -308,9 +375,9 @@ class AutomationEditor:
                     confirmations += 1
                     started = time.perf_counter()
                     try:
-                        actual = self.read_once()
-                        if actual == expected:
-                            return actual
+                        self.check_focus()
+                        if self.expected_once(expected, document=document) == "match":
+                            return expected
                     except SnapshotPending:
                         pass  # input or provider state is still being updated
                     finally:
@@ -322,7 +389,7 @@ class AutomationEditor:
                 # slow/unresponsive provider. No nested 0.5-second read loop.
                 delay = min(0.002 if probes <= 2 else 0.005 if probes <= 5 else 0.01, remaining)
                 started = time.perf_counter()
-                time.sleep(delay)
+                poll_sleep(delay)
                 sleep_seconds += time.perf_counter() - started
         finally:
             total = time.perf_counter() - wait_started
@@ -413,14 +480,38 @@ class AutomationEditor:
             raise RuntimeError("文字範囲の準備中に本文が変更されました")
         return True
 
-    def replace(self, state, start, end, result, expected_tick=None):
+    def replace_positioned(self, state, start, end, result, expected_tick, caret):
+        inserted = start + len(result)
+        steps = 0
+        if getattr(self, "chromium", False) and caret > inserted:
+            count = caret - inserted
+            from .editor import simple_caret_text
+            if (count <= 16 and end + count <= len(state.text) and
+                    all(c in "。、，．！？!?.,:;" for c in state.text[end:end + count]) and
+                    simple_caret_text(state.text) and simple_caret_text(result)):
+                try:
+                    direction = self.pattern.DocumentRange.GetAttributeValue(
+                        self.automation.types.UIA_TextFlowDirectionsAttributeId)
+                    if (self.element.CurrentControlType == self.automation.types.UIA_EditControlTypeId
+                            and type(direction) is int and direction == 0):
+                        steps = count
+                except Exception:
+                    pass  # unknown direction/control retains UIA caret restoration
+        self.replace(state, start, end, result, expected_tick=expected_tick, caret_steps=steps)
+        return inserted + steps
+
+    def replace(self, state, start, end, result, expected_tick=None, caret_steps=0):
         before_tick = input_tick() if expected_tick is None else expected_tick
         with stage("UIA/書き込み準備と状態確認"):
             events = unicode_events(result)  # validate before changing selection
+            if caret_steps:
+                with stage("UIA/句読点後への一括カーソル移動"):
+                    events.extend(KeyboardInput(0x27, 0, flags, 0, 0)
+                                  for _ in range(caret_steps) for flags in (0, 2))
             self.check_focus()
             self.check_writable()
             check_input_ready(self.window[1])
-            if self.read() != state:
+            if self.confirm_expected(state, focus_checked=True) != "match":
                 raise RuntimeError("置換直前に本文または選択位置が変わりました")
         selected = self.range_for(state, start, end)
         if input_tick() != before_tick:
@@ -435,18 +526,15 @@ class AutomationEditor:
                 # Different provider anchors can represent the same textual
                 # boundary. Verify freshly read text and offsets, rather than
                 # equating raw range endpoints from separate COM objects.
-                actual = self.read()  # checks focus before and after the snapshot
-                if actual == wanted:
+                actual = self.confirm_expected(wanted)
+                if actual == "match":
                     break
-                if actual.text != state.text:
+                if actual == "text_changed":
                     raise RuntimeError("選択の反映待ちに本文が変更されました")
                 if time.monotonic() >= deadline:
-                    logger.debug("UIA選択不一致: 要求=%s:%s / 実際=%s:%s / 要求文字=%r / 実際文字=%r",
-                                 start, end, actual.start, actual.end, state.text[start:end],
-                                 actual.text[actual.start:actual.end])
-                    raise RuntimeError(f"UIAの選択が反映されませんでした（要求{start}:{end}、"
-                                       f"実際{actual.start}:{actual.end}）。文字は送信していません")
-                time.sleep(0.01)
+                    observed = self.read()
+                    raise RuntimeError(f"UIAの選択が反映されませんでした（要求{start}:{end}、実際{observed.start}:{observed.end}）。文字は送信していません")
+                poll_sleep(0.01)
         with stage("UIA/送信前確認"):
             self.check_focus()
             if self.get_text(self.pattern.DocumentRange) != state.text:
@@ -464,7 +552,7 @@ class AutomationEditor:
             self.ime_session.disable()
         with stage("UIA/IME変更後の再確認"):
             # read() checks focus both before and after the full snapshot.
-            if self.read() != wanted or input_tick() != before_tick:
+            if self.confirm_expected(wanted) != "match" or input_tick() != before_tick:
                 raise RuntimeError("IME切り替え中に本文・選択または操作状態が変わりました。文字は送信していません")
         with stage("UIA/SendInput送信"):
             send(events)  # never delete first or retry partial input

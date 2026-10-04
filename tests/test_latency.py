@@ -67,7 +67,7 @@ class LatencyTests(unittest.TestCase):
                 patch.object(win, "input_tick", return_value=10), \
                 patch.object(win.user, "GetAsyncKeyState",
                              side_effect=lambda key: 0x8000 if held and key == 0x4B else 0), \
-                patch.object(win.time, "sleep", side_effect=release):
+                patch.object(win, "poll_sleep", side_effect=release):
             with self.assertRaisesRegex(RuntimeError, "本文または選択位置"):
                 engine.apply(captured, "散歩")
         self.assertFalse(held)

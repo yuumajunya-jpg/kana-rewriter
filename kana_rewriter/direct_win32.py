@@ -8,6 +8,7 @@ from .editor import TextState, python_offset, utf16_length
 from .winapi import user, focus, KeyboardInput, send
 from .input_activity import input_tick
 from .timing import stage
+from .waiting import sleep as poll_sleep
 
 logger = logging.getLogger(__name__)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -79,7 +80,7 @@ def wait_input_release(target, trigger_keys=()):
             return
         if time.monotonic() >= deadline:
             raise RuntimeError("ショートカットキーを離してください")
-        time.sleep(0.005)
+        poll_sleep(0.005)
 
 
 def unicode_events(text):

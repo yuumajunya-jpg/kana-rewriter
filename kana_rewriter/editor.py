@@ -9,6 +9,13 @@ def utf16_length(text):
     return len(text.encode("utf-16-le")) // 2
 
 
+def simple_caret_text(text):
+    """Conservative navigation set shared in meaning with the C++ worker."""
+    return all(0x20 <= ord(c) <= 0x7e or c in "\n\r\t" or
+               0x3041 <= ord(c) <= 0x3096 or 0x30a1 <= ord(c) <= 0x30fc or
+               0x3400 <= ord(c) <= 0x9fff or c in "　。、！，．？" for c in text)
+
+
 def python_offset(text, offset):
     payload = text.encode("utf-16-le")
     if not 0 <= offset <= len(payload) // 2:

@@ -98,6 +98,7 @@ class EditorEngine:
 
     def apply_once(self, capture, result):
         from .direct_win32 import window_identity, input_tick, wait_input_release
+        from .waiting import sleep as poll_sleep
         if self.saved is None or self.saved[0] != capture:
             raise RuntimeError("取得した編集対象が無効になっています")
         saved, editor, state = self.saved
@@ -123,10 +124,13 @@ class EditorEngine:
         if window_identity() != target or input_tick() != tick:
             raise RuntimeError("適用直前に操作があったため中止しました")
         with stage("適用/選択と文字送信"):
-            editor.replace(state, start, end, result, expected_tick=tick)
+            insertion_end = start + len(result)
+            if getattr(editor, "positions_with_input", False) is True:
+                insertion_end = editor.replace_positioned(state, start, end, result, tick, caret)
+            else:
+                editor.replace(state, start, end, result, expected_tick=tick)
         with stage("適用/入力反映確認"):
             deadline = time.monotonic() + min(self.config.editor_timeout_seconds, 2)
-            insertion_end = start + len(result)
             last_status = None
             wait_for_state = getattr(editor, "wait_for_state", None)
             while True:
@@ -147,7 +151,7 @@ class EditorEngine:
                     break
                 if editor.kind != "uia" or time.monotonic() >= deadline:
                     raise RuntimeError("差し替え結果を確認できませんでした。本文を確認してください。編集は再送しません")
-                time.sleep(0.01)
+                poll_sleep(0.01)
         after_input_tick = input_tick()
         with stage("適用/カーソル復元と確認"):
             if caret != insertion_end:
@@ -165,7 +169,7 @@ class EditorEngine:
                         raise RuntimeError("カーソル復元中に操作がありました")
                     if time.monotonic() >= deadline:
                         raise RuntimeError("文字列は置換しましたが、カーソルの復元を確認できませんでした")
-                    time.sleep(0.01)
+                    poll_sleep(0.01)
         return True
 
     def inspect(self):
@@ -205,7 +209,9 @@ def _worker(connection, config, debug, timings=False):
         pass
     finally:
         from .input_activity import close_monitor
+        from .waiting import close_timer
         close_monitor()
+        close_timer()
         connection.close()
 
 

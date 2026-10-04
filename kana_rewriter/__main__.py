@@ -5,12 +5,24 @@ import sys
 import time
 import logging
 import json
+from dataclasses import replace
 
 from .core import Config, Converter, apply_result
 from .hotkeys import parse_hotkey
 from .timing import stage, buffered_logs, flush_logs
 
 logger = logging.getLogger(__name__)
+
+
+class FixedConverter:
+    """Exercise the normal hotkey/edit path without loading or calling AI."""
+    def __init__(self, source, result):
+        self.source, self.result = source, result
+
+    def convert_selection(self, source, left_context, right_context):
+        if source != self.source:
+            raise RuntimeError("比較用の変換対象と一致しないため中止しました")
+        return self.result
 
 
 @stage("変換/AI呼び出し")
@@ -29,7 +41,15 @@ def main():
     parser.add_argument("--debug", action="store_true", help="変換対象・文脈・モデル出力・編集方式を端末に表示")
     parser.add_argument("--timings", action="store_true", help="本文を表示せず、編集完了後に工程時間を表示")
     parser.add_argument("--inspect", action="store_true", help="3秒後の入力欄の直接編集能力を表示（文字変更なし）")
+    parser.add_argument("--editor-worker", choices=("python", "native"), help="設定ファイルの編集ワーカーを今回だけ上書き")
+    parser.add_argument("--benchmark-source", help="AIなし比較用の変換対象（完全一致時のみ置換）")
+    parser.add_argument("--benchmark-result", help="AIなし比較用の固定変換結果")
     args = parser.parse_args()
+    benchmarking = args.benchmark_source is not None or args.benchmark_result is not None
+    if benchmarking and (not args.benchmark_source or not args.benchmark_result):
+        parser.error("比較には空でない--benchmark-sourceと--benchmark-resultが必要です")
+    if benchmarking and (args.text is not None or args.inspect):
+        parser.error("比較モードと--text・--inspectは併用できません")
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format="[診断] %(message)s")
     elif args.timings:
@@ -39,7 +59,11 @@ def main():
         logger.setLevel(logging.DEBUG)
     try:
         config = Config.load(args.config) if args.config else Config()
-        converter = Converter(config)
+        if args.editor_worker:
+            config = replace(config, editor_worker=args.editor_worker)
+        if benchmarking and config.edit_backend == "clipboard":
+            raise RuntimeError("編集ワーカー比較には直接編集の設定を使用してください")
+        converter = FixedConverter(args.benchmark_source, args.benchmark_result) if benchmarking else Converter(config)
         if args.inspect:
             if sys.platform != "win32":
                 raise RuntimeError("入力欄の診断はWindows専用です")
@@ -60,7 +84,9 @@ def main():
             return 0
         if sys.platform != "win32":
             raise RuntimeError("ショートカットでの変換はWindows専用です")
-        if config.backend == "llama_cpp":
+        if benchmarking:
+            print(f"AIなし比較: editor_worker={config.editor_worker} / 一致する対象だけを固定結果へ置換します", flush=True)
+        elif config.backend == "llama_cpp":
             print("GGUFモデルを読み込んでいます…", flush=True)
             converter.load_model()
         return run_windows(converter, config, debug=args.debug, timings=args.timings)

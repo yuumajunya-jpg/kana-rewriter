@@ -86,7 +86,7 @@ class WorkerDiagnosticsTests(unittest.TestCase):
         editor.window = (1, 2, 3)
         editor.check_focus = Mock()
         editor.check_writable = Mock()
-        editor.read = Mock(return_value=TextState("changed", 0, 0))
+        editor.confirm_expected = Mock(return_value="text_changed")
         editor.range_for = Mock()
         with patch("kana_rewriter.direct_uia.check_input_ready"), \
                 patch("kana_rewriter.direct_uia.send") as send:

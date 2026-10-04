@@ -1,5 +1,6 @@
-"""ABBA read comparison on the same hidden fixture; never sends input."""
+"""Balanced read comparison on the same hidden fixture; never sends input."""
 import argparse
+import importlib.util
 import json
 import math
 import multiprocessing
@@ -24,16 +25,23 @@ def main():
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--native-exe", type=Path, default=ROOT / "build" / "native" / "kana-editor-worker.exe")
+    parser.add_argument("--baseline-python", type=Path, help="比較する旧direct_uia.py（読み取り専用測定）")
     args = parser.parse_args()
     if not 4 <= args.samples <= 1000 or args.samples % 2:
         parser.error("--samples must be even, from 4 to 1000")
     exe = args.native_exe.resolve()
+    baseline_type = None
+    if args.baseline_python:
+        spec = importlib.util.spec_from_file_location("kana_rewriter._baseline_uia", args.baseline_python.resolve())
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        baseline_type = module.AutomationEditor
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=native_fixture, args=(child, True))
     process.start()
     child.close()
-    result = {"scope": "Read-only hidden RichEdit, same HWND, ABBA; no focus checks or desktop editing",
+    result = {"scope": "Read-only hidden RichEdit, same HWND, ABBA or ABCCBA; no focus checks or desktop editing",
               "uia_wait": "Fixture message pump includes a 5 ms polling interval", "results": {}}
     try:
         if not parent.poll(10):
@@ -50,8 +58,15 @@ def main():
         uia.check_focus = Mock()
         for backend, editor in (("win32", win32), ("uia", uia)):
             samples = {"python": [], "native": []}
+            baseline = None
+            if baseline_type and backend == "uia":
+                baseline = baseline_type.__new__(baseline_type)
+                baseline.automation, baseline.element, baseline.pattern = automation, element, pattern
+                baseline.limit, baseline.check_focus = config.max_document_chars, Mock()
+                samples["baseline_python"] = []
             expected = editor.read()
-            for mode in ("python", "native", "native", "python"):
+            order = ("baseline_python", "python", "native", "native", "python", "baseline_python") if baseline else ("python", "native", "native", "python")
+            for mode in order:
                 if mode == "native":
                     completed = subprocess.run([str(exe), "--benchmark-read", str(hwnd), backend,
                                                 str(args.samples // 2)], capture_output=True, text=True,
@@ -62,7 +77,7 @@ def main():
                 else:
                     for trial in range(args.samples // 2 + 2):
                         before = time.perf_counter()
-                        actual = editor.read()
+                        actual = (baseline if mode == "baseline_python" else editor).read()
                         elapsed = (time.perf_counter() - before) * 1000
                         if actual != expected:
                             raise RuntimeError("Fixture changed")

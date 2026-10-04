@@ -758,6 +758,7 @@ class UiaRangeTests(unittest.TestCase):
         editor.pattern = SimpleNamespace(DocumentRange=Range(model))
         editor.check_focus = Mock()
         editor.check_writable = Mock()
+        editor.check_probe_focus = Mock()
         editor.ime_session_factory = Mock(return_value=Mock())
         editor.selection = lambda: model.selected
         return editor, model
