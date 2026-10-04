@@ -39,8 +39,19 @@ class Config:
     editor_timeout_seconds: float = 5
     max_document_chars: int = 200000
     uia_readback_initial_delay_ms: int = 0
+    editor_worker: str = "python"
+    native_worker_path: str = str(Path(__file__).resolve().parents[1] / "build" / "native" / "kana-editor-worker.exe")
+    native_uia_wait: str = "poll"
 
     def __post_init__(self):
+        if self.editor_worker not in {"python", "native"}:
+            raise ValueError("editor_workerはpythonまたはnativeです")
+        if self.native_uia_wait not in {"poll", "event"}:
+            raise ValueError("native_uia_waitはpollまたはeventです")
+        if not isinstance(self.native_worker_path, str) or not self.native_worker_path:
+            raise ValueError("native_worker_pathは実行ファイルのパスです")
+        if self.editor_worker == "native" and self.edit_backend == "clipboard":
+            raise ValueError("C++編集ワーカーではclipboardを使用できません")
         if (type(self.uia_readback_initial_delay_ms) is not int
                 or not 0 <= self.uia_readback_initial_delay_ms <= 100):
             raise ValueError("uia_readback_initial_delay_msは0〜100の整数です")
@@ -87,6 +98,10 @@ class Config:
         model_path = Path(values.get("model_path", cls.model_path))
         if not model_path.is_absolute():
             values["model_path"] = str(file.parent / model_path)
+        if "native_worker_path" in values:
+            worker_path = Path(values["native_worker_path"])
+            if not worker_path.is_absolute():
+                values["native_worker_path"] = str(file.parent / worker_path)
         return cls(**values)
 
 

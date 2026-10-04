@@ -43,7 +43,10 @@ def main():
         if args.inspect:
             if sys.platform != "win32":
                 raise RuntimeError("入力欄の診断はWindows専用です")
-            from .direct import Desktop
+            if config.editor_worker == "native":
+                from .native import Desktop
+            else:
+                from .direct import Desktop
             print("3秒以内に診断する入力欄へフォーカスを移してください", flush=True)
             time.sleep(3)
             desktop = Desktop(config, debug=args.debug, timings=args.timings)
@@ -82,7 +85,10 @@ def run_windows(converter, config, debug=False, timings=False):
                           stop_at_kanji=config.stop_at_kanji,
                           trailing_punctuation=config.trailing_punctuation)
     else:
-        from .direct import Desktop
+        if config.editor_worker == "native":
+            from .native import Desktop
+        else:
+            from .direct import Desktop
         desktop = Desktop(config, debug=debug, timings=timings)
     try:
         waiter = MessageWaiter()
