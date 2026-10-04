@@ -23,10 +23,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--native-exe", type=Path, default=ROOT / "build" / "native" / "kana-editor-worker.exe")
     args = parser.parse_args()
     if not 4 <= args.samples <= 1000 or args.samples % 2:
         parser.error("--samples must be even, from 4 to 1000")
-    exe = ROOT / "build" / "native" / "kana-editor-worker.exe"
+    exe = args.native_exe.resolve()
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=native_fixture, args=(child, True))

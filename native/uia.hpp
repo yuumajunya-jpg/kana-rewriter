@@ -4,6 +4,34 @@
 #include <utility>
 
 namespace kana {
+// Arrow keys have provider-dependent character/grapheme semantics. Restrict
+// batching to a short unchanged suffix of ordinary, non-combining punctuation.
+inline size_t punctuation_steps(const State& state, size_t end, size_t inserted, size_t caret) {
+    if (caret <= inserted || caret - inserted > 16) return 0;
+    auto count = caret - inserted;
+    if (end > points(state.text) || count > points(state.text) - end) return 0;
+    auto suffix = state.text.substr(unit_offset(state.text, end), count);
+    const std::wstring allowed = L"。、，．！？!?.,:;";
+    for (auto ch : suffix) if (allowed.find(ch) == std::wstring::npos) return 0;
+    return suffix.size() == count ? count : 0;
+}
+inline void append_right_keys(std::vector<INPUT>& events, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        INPUT down{}; down.type = INPUT_KEYBOARD; down.ki.wVk = VK_RIGHT;
+        auto up = down; up.ki.dwFlags = KEYEVENTF_KEYUP;
+        events.push_back(down); events.push_back(up);
+    }
+}
+inline bool simple_caret_text(const std::wstring& text) {
+    // Be conservative about graphemes, variation selectors and bidi. In
+    // particular, punctuation followed by a combining mark is not one step.
+    return std::all_of(text.begin(), text.end(), [](wchar_t ch) {
+        return (ch >= 0x20 && ch <= 0x7e) || ch == L'\n' || ch == L'\r' || ch == L'\t' ||
+               (ch >= 0x3041 && ch <= 0x3096) || (ch >= 0x30a1 && ch <= 0x30fc) ||
+               (ch >= 0x3400 && ch <= 0x9fff) || ch == 0x3000 || ch == 0x3001 || ch == 0x3002 ||
+               ch == 0xff01 || ch == 0xff1f || ch == 0xff0c || ch == 0xff0e;
+    });
+}
 template<class T> class Com {
     T* value_ = nullptr;
 public:
@@ -112,6 +140,7 @@ class UiaEditor : public Editor {
     Com<IUIAutomationTextPattern> pattern_;
     Com<IUIAutomationTextPattern2> caret_pattern_;
     bool caret_checked_ = false, chromium_ = false;
+    size_t queued_right_ = 0;
     std::wstring focused_class_;
     Com<IUIAutomationTextRange> anchor_;
     State anchor_state_;
@@ -146,7 +175,7 @@ class UiaEditor : public Editor {
         hr(range->MoveEndpointByUnit(end, TextUnit_Character, count, &moved), "Cannot move text range");
         return moved;
     }
-    Com<IUIAutomationTextRange> selection() {
+    Com<IUIAutomationTextRange> selection(bool* is_collapsed = nullptr) {
         Com<IUIAutomationTextRangeArray> ranges;
         hr(pattern_->GetSelection(ranges.put()), "Cannot obtain selection");
         int count = 0;
@@ -154,7 +183,9 @@ class UiaEditor : public Editor {
         require(count <= 1, "Multiple selections are not supported");
         Com<IUIAutomationTextRange> selected;
         if (count == 1) hr(ranges->GetElement(0, selected.put()), "Cannot obtain selected range");
-        if (selected && !collapsed(selected.get())) return selected;
+        bool empty = !selected || collapsed(selected.get());
+        if (is_collapsed) *is_collapsed = empty;
+        if (selected && !empty) return selected;
         if (!caret_checked_) {
             caret_pattern_ = pattern<IUIAutomationTextPattern2>(element_.get(), UIA_TextPattern2Id);
             caret_checked_ = true;
@@ -170,21 +201,22 @@ class UiaEditor : public Editor {
         require(bool(selected), "Cannot obtain caret or selection");
         return selected;
     }
-    State read_once() {
-        focus();
-        auto doc = document();
-        auto text = get_text(doc.get());
+    State read_once(Com<IUIAutomationTextRange> doc = {}, std::wstring text = {}) {
+        // A wait probe supplies the document just read after a fresh focus
+        // check. Reuse that observation, but always reread at the end.
+        if (!doc) { focus(); doc = document(); text = get_text(doc.get()); }
         if (focused_class_ == L"native-edit-context" && !text.empty()) {
             BSTR name = nullptr;
             hr(focused_->get_CurrentName(&name), "Cannot read editor accessibility label");
             require(text != normalize(bstr(name)), "VS Code/Monaco is exposing a label; enable editor.accessibilitySupport");
         }
-        auto selected = selection();
+        bool empty = false;
+        auto selected = selection(&empty);
         auto prefix = clone(doc.get());
         endpoint(prefix.get(), TextPatternRangeEndpoint_End, selected.get(), TextPatternRangeEndpoint_Start);
         auto left = get_text(prefix.get());
         std::wstring through = left, contents;
-        if (!collapsed(selected.get())) {
+        if (!empty) {
             endpoint(prefix.get(), TextPatternRangeEndpoint_End, selected.get(), TextPatternRangeEndpoint_End);
             through = get_text(prefix.get());
             contents = get_text(selected.get());
@@ -265,8 +297,7 @@ class UiaEditor : public Editor {
         throw std::runtime_error("Cannot verify replacement range; text was not sent");
     }
     void pause(DWORD milliseconds) {
-        if (subscribed_) WaitForSingleObject(signal_->event, milliseconds);
-        else Sleep(milliseconds);
+        poll_pause(milliseconds, subscribed_ ? signal_->event : nullptr);
     }
 public:
     UiaEditor(const Identity& target, const Config& config, Activity& activity, Automation& automation,
@@ -275,7 +306,7 @@ public:
         : Editor(target, config, activity), automation_(automation), focused_(std::move(focused)),
           element_(std::move(element)), pattern_(std::move(text_pattern)) {
         auto metadata = automation_.metadata(focused_.get());
-        auto provider = automation_.metadata(element_.get());
+        auto provider = element_.get() == focused_.get() ? metadata : automation_.metadata(element_.get());
         focused_class_ = metadata.second;
         chromium_ = metadata.first == L"chrome" || metadata.first == L"chromium" || provider.first == L"chrome" ||
                     provider.first == L"chromium" || starts(window_class(target.focus), L"chrome_");
@@ -351,9 +382,33 @@ public:
             }
         }
     }
+    size_t replace_positioned(const State& state, size_t start, size_t end,
+                              const std::wstring& result, uint64_t tick, size_t caret) override {
+        auto inserted = start + points(result);
+        CONTROLTYPEID type = 0;
+        // Limit the shortcut to Chromium Edit controls. Documents/Monaco,
+        // bidirectional text and arbitrary character navigation retain Select.
+        auto steps = punctuation_steps(state, end, inserted, caret);
+        bool simple_direction = simple_caret_text(state.text) && simple_caret_text(result);
+        if (steps && chromium_ && simple_direction &&
+            SUCCEEDED(element_->get_CurrentControlType(&type)) && type == UIA_EditControlTypeId) {
+            Variant direction;
+            if (SUCCEEDED(document()->GetAttributeValue(UIA_TextFlowDirectionsAttributeId, &direction.value)) &&
+                direction.value.vt == VT_I4 && direction.value.lVal == 0) queued_right_ = steps;
+        }
+        auto positioned = inserted + queued_right_;
+        try { replace(state, start, end, result, tick); }
+        catch (...) { queued_right_ = 0; throw; }
+        queued_right_ = 0;
+        return positioned;
+    }
     void replace(const State& state, size_t start, size_t end, const std::wstring& result, uint64_t tick) override {
         Stage timing("uia_replace");
         auto events = unicode_events(result);
+        if (queued_right_) {
+            Stage navigation("uia_caret_batch");
+            append_right_keys(events, queued_right_);
+        }
         {
             Stage preparation("uia_prepare");
             guard(tick); writable(); input_ready(target_.focus);
@@ -395,8 +450,10 @@ public:
         while (true) {
             focus();
             try {
-                if (get_text(document().get()) == expected.text) {
-                    auto actual = read_once();
+                auto doc = document();
+                auto text = get_text(doc.get());
+                if (text == expected.text) {
+                    auto actual = read_once(std::move(doc), std::move(text));
                     if (actual == expected) return actual;
                 }
             } catch (const Pending&) {}
@@ -432,10 +489,10 @@ inline std::unique_ptr<Editor> focused_editor(const Identity& target, const Conf
     require(!safety[0] && safety[1] && safety[2], "Password, disabled or unfocused input");
     auto element = focused;
     Com<IUIAutomationTreeWalker> walker;
-    hr(automation->client->get_ControlViewWalker(walker.put()), "Cannot obtain UIA tree walker");
     for (int depth = 0; depth < 8 && element; ++depth) {
         auto text = pattern<IUIAutomationTextPattern>(element.get(), UIA_TextPatternId);
         if (text) return std::make_unique<UiaEditor>(target, config, activity, *automation, focused, element, text, safety);
+        if (!walker) hr(automation->client->get_ControlViewWalker(walker.put()), "Cannot obtain UIA tree walker");
         Com<IUIAutomationElement> parent;
         hr(walker->GetParentElement(element.get(), parent.put()), "Cannot obtain input ancestor");
         element = parent;

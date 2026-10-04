@@ -85,16 +85,15 @@ public:
             auto a = unit_offset(saved_.text, start), b = unit_offset(saved_.text, end);
             auto expected = saved_.text.substr(0, a) + text + saved_.text.substr(b);
             require(points(expected) <= config_.limit && caret <= points(expected), "Replacement exceeds document limit");
-            auto inserted = start + points(text);
             try {
                 release_keys(target_, keys_);
                 editor->focus();
                 auto tick = activity_.tick();
-                editor->replace(saved_, start, end, text, tick);
-                auto updated = editor->wait({expected, inserted, inserted},
+                auto input_caret = editor->replace_positioned(saved_, start, end, text, tick, caret);
+                auto updated = editor->wait({expected, input_caret, input_caret},
                     Clock::now() + std::chrono::milliseconds(std::min<uint64_t>(config_.timeout_ms, 2000)));
                 auto after_tick = activity_.tick();
-                if (caret != inserted) {
+                if (caret != input_caret) {
                     Stage timing_restore("caret_restore");
                     editor->guard(after_tick);
                     editor->restore(updated, caret, after_tick);
@@ -106,7 +105,7 @@ public:
                         if (state == State{expected, caret, caret}) break;
                         editor->guard(after_tick);
                         require(Clock::now() < deadline, "Text replaced but caret restoration could not be confirmed");
-                        Sleep(10);
+                        poll_pause(10);
                     }
                 }
                 editor->finish();
@@ -220,6 +219,29 @@ void self_test() {
     rejected = false;
     try { unicode_events(L"\t"); } catch (...) { rejected = true; }
     require(rejected, "Tab input accepted");
+    State punctuation{wide(u8"さんぽ。！？後ろ"), 3, 3};
+    require(punctuation_steps(punctuation, 3, 2, 5) == 3, "Punctuation suffix not batched");
+    require(!punctuation_steps(punctuation, 3, 2, 6), "Ordinary text navigation batched");
+    require(!punctuation_steps(punctuation, 3, 2, 1), "Backward navigation batched");
+    require(!punctuation_steps({wide(u8"。😀"), 0, 0}, 0, 0, 2), "Surrogate navigation batched");
+    require(!punctuation_steps({L".\n", 0, 0}, 0, 0, 2), "Newline navigation batched");
+    require(!punctuation_steps({std::wstring(17, L'.'), 0, 0}, 0, 0, 17), "Unbounded navigation batched");
+    require(simple_caret_text(wide(u8"前。さんぽ！？後ろ\n")), "Simple Japanese navigation rejected");
+    require(!simple_caret_text(wide(u8"。\u0301")) && !simple_caret_text(wide(u8"😀。")) &&
+            !simple_caret_text(wide(u8"\u200f。")), "Complex grapheme or bidi navigation batched");
+    auto positioned = unicode_events(wide(u8"散歩"));
+    append_right_keys(positioned, 2);
+    require(positioned.size() == 8 && positioned[4].ki.wVk == VK_RIGHT &&
+            positioned[5].ki.dwFlags == KEYEVENTF_KEYUP && positioned[6].ki.wVk == VK_RIGHT,
+            "Input and caret navigation order");
+    PollTimer timer;
+    HANDLE signal = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    require(signal != nullptr, "Cannot create polling test event");
+    timer.wait(100, signal); // already signalled notification also cancels timer
+    CloseHandle(signal);
+    auto before_wait = Clock::now();
+    timer.wait(2);
+    require(Clock::now() - before_wait >= std::chrono::milliseconds(2), "Polling timer returned early");
     Writer encoded; encoded.number(0x123456789abcdef0ULL); encoded.text(utf8(text));
     Reader decoded{encoded.data};
     require(decoded.number() == 0x123456789abcdef0ULL && decoded.text() == utf8(text), "Protocol roundtrip");
@@ -299,6 +321,18 @@ int main(int argc, char** argv) {
     int status = 0;
     try {
         if (argc == 2 && std::string(argv[1]) == "--self-test") self_test();
+        else if (argc == 2 && std::string(argv[1]) == "--benchmark-wait") {
+            for (DWORD delay : {DWORD(2), DWORD(5), DWORD(10)}) {
+                for (bool precise : {false, true}) {
+                    auto before = Clock::now();
+                    for (int sample = 0; sample < 30; ++sample) {
+                        if (precise) poll_pause(delay); else Sleep(delay);
+                    }
+                    auto us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - before).count();
+                    std::cout << (precise ? "timer" : "sleep") << " " << delay << " " << us / 30.0 / 1000.0 << '\n';
+                }
+            }
+        }
         else if (argc == 5 && std::string(argv[1]) == "--benchmark-read")
             benchmark_read(reinterpret_cast<HWND>(uintptr_t(std::stoull(argv[2]))), argv[3], std::stoi(argv[4]));
         else {

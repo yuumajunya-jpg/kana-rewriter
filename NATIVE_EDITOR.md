@@ -90,3 +90,43 @@ UIAの中央値は約14.6%短縮。事前の照会削減を入れない移植で
 実ブラウザーでは試験専用入力欄で同じ本文・選択位置を復元し、固定の変換結果を渡してAIを測定から除外する。Python、C++/poll、C++/eventの取得・選択・SendInput・反映待ち・カーソル復元・IME復元・全体について、中央値・p95・成功率を比較する。通知準備・解除も全体に含める。推論中の入力・フォーカス変更、絵文字、空行、末尾記号、Undo、IMEオン/オフも検証する。
 
 実ブラウザーで改善と互換性を確認するまではネイティブ版を既定にしない。
+
+## 追加最適化（2026-10-04）
+
+ブラウザメモ帳での利用者の5回のログでは、AI以外の平均は157.7ms。入力反映確認49.1〜62.9ms、カーソル復元10.1〜41.7ms、キー解放待ち0〜53.2msだった。IPCの追加時間は約0.5msで、言語移植より入力経路と待ち方の改善を優先する。
+
+- UIAの反映待ちで、直前に取得したDocumentRange・全文を最終確認の開始状態に再利用する。最後の全文再取得とフォーカス確認は維持する。成功時の全文取得は3回から2回になる。
+- 選択取得時に確認済みの「選択範囲か、カーソルか」を再利用し、同じ範囲のCompareEndpointsを重ねない。同一要素のメタデータ再取得と、不要なTreeWalker取得も省く。
+- ポーリングの2/5/10ms、キー解放の5ms、カーソル復元の10msは設定値を変えず、スレッド専用の高精度待機タイマーで待つ。通知モードでは通知とタイマーを同時に待つ。タイマー未対応・失敗時は従来の待機に戻る。システム全体のタイマー精度は変更しない。[MicrosoftのAPI仕様](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw)で高精度タイマーはWindows 10 version 1803以降に対応する。
+- ChromiumのEdit入力欄で、全文と変換結果が単純な日本語・ASCIIであり、進行方向属性が左から右、未編集の末尾が16文字以内の単純な句読点の場合、文字入力と必要な右移動を同じSendInputにまとめる。最終全文・カーソル位置を確認し、後続のUIAカーソル復元を省く。絵文字、結合文字、方向属性不明、Monaco等は従来の経路を使う。診断の`C++/uia_caret_batch`がこの経路を使った目印。不一致時は編集も移動も再送しない。
+
+同一環境で各30回の短時間待機の平均実測（ブラウザ変換全体の実測ではない）:
+
+| 指定時間 | Sleep | 高精度タイマー |
+| --- | ---: | ---: |
+| 2ms | 13.108ms | 2.649ms |
+| 5ms | 16.773ms | 5.442ms |
+| 10ms | 16.723ms | 10.486ms |
+
+非表示RichEdit取得のPython/C++ ABBA比較を各20回実施したところ、UIA中央値は232.753/174.375ms、p95は249.654/183.892msだった。前回と標本数・実行時点が異なるため、前回からの改善幅を厳密には示さない。今回も実ブラウザの一変換時間や、句読点移動の互換性の検証とは別の測定である。
+
+実行中のexeはWindowsが上書きを拒否する。別名でビルドして切り替える場合:
+
+```powershell
+.\scripts\build_native.ps1 -Compiler .\build\toolchain\llvm-mingw-20260922-ucrt-x86_64\bin\x86_64-w64-mingw32-clang++.exe -OutputName kana-editor-worker-optimized.exe
+```
+
+```toml
+native_worker_path = "build/native/kana-editor-worker-optimized.exe"
+```
+
+ワーカーは起動時に選ばれるため、設定変更後は変換ツールを終了して再起動する。別名のexeを回帰テストや取得比較に使う場合:
+
+```powershell
+$env:KANA_NATIVE_TEST_EXE = "$PWD/build/native/kana-editor-worker-optimized.exe"
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -q
+.\build\native\kana-editor-worker-optimized.exe --benchmark-wait
+.\.venv\Scripts\python.exe -B scripts\benchmark_native_reads.py --native-exe build/native/kana-editor-worker-optimized.exe --samples 20
+```
+
+ネイティブ自己テストは句読点移動の上限・順序と、絵文字・結合文字・双方向文字・改行移動の除外、高精度タイマーの待機と通知も検証する。実サイトでの変換速度とUndoの確認は引き続き必要。

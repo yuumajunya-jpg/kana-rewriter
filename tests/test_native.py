@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -12,7 +13,7 @@ from kana_rewriter.core import Config, apply_result
 from kana_rewriter.native import Desktop, Reader, Writer, MAGIC, MAX_FRAME, read_frame
 
 ROOT = Path(__file__).resolve().parents[1]
-EXECUTABLE = ROOT / "build" / "native" / "kana-editor-worker.exe"
+EXECUTABLE = Path(os.environ.get("KANA_NATIVE_TEST_EXE", ROOT / "build" / "native" / "kana-editor-worker.exe"))
 
 
 class NativeProtocolTests(unittest.TestCase):
@@ -141,7 +142,7 @@ class NativeAdapterTests(unittest.TestCase):
 class NativeExecutableTests(unittest.TestCase):
     def test_real_worker_protocol_and_shutdown(self):
         for wait in ("poll", "event"):
-            desktop = Desktop(Config(editor_worker="native", native_uia_wait=wait))
+            desktop = Desktop(Config(editor_worker="native", native_worker_path=str(EXECUTABLE), native_uia_wait=wait))
             try:
                 self.assertTrue(desktop.warmup())
                 process = desktop.process

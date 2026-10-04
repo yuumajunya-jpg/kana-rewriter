@@ -36,6 +36,30 @@ inline bool standard(HWND hwnd) {
     return name == L"edit" || starts(name, L"richedit");
 }
 inline bool pressed(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+// Sleep/WaitForSingleObject timeouts can round short polling delays up to a
+// scheduler tick. A per-thread high-resolution timer keeps the same requested
+// backoff without changing the system-wide timer resolution. Older Windows
+// versions or timer failures retain the existing timeout-based behavior.
+class PollTimer {
+    HANDLE timer_ = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002,
+                                          TIMER_MODIFY_STATE | SYNCHRONIZE);
+public:
+    ~PollTimer() { if (timer_) CloseHandle(timer_); }
+    void wait(DWORD milliseconds, HANDLE event = nullptr) {
+        LARGE_INTEGER due{}; due.QuadPart = -10000LL * milliseconds;
+        if (timer_ && milliseconds && SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
+            HANDLE handles[]{timer_, event};
+            auto status = WaitForMultipleObjects(event ? 2 : 1, handles, FALSE, INFINITE);
+            if (status != WAIT_FAILED) { CancelWaitableTimer(timer_); return; }
+        }
+        if (event) WaitForSingleObject(event, milliseconds);
+        else Sleep(milliseconds);
+    }
+};
+inline void poll_pause(DWORD milliseconds, HANDLE event = nullptr) {
+    thread_local PollTimer timer;
+    timer.wait(milliseconds, event);
+}
 inline void input_ready(HWND hwnd, bool modifiers = false) {
     if (!modifiers)
         for (auto key : {VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN}) require(!pressed(key), "Release modifier keys");
@@ -59,7 +83,7 @@ inline void release_keys(const Identity& target, const std::vector<int>& trigger
         for (auto key : trigger) held |= pressed(key);
         if (!held) return;
         require(Clock::now() < deadline, "Release conversion hotkey");
-        Sleep(5);
+        poll_pause(5);
     }
 }
 class Activity {
@@ -174,6 +198,11 @@ public:
     virtual const char* kind() const = 0;
     virtual State read() = 0;
     virtual void replace(const State&, size_t, size_t, const std::wstring&, uint64_t) = 0;
+    virtual size_t replace_positioned(const State& state, size_t start, size_t end,
+                                     const std::wstring& result, uint64_t tick, size_t) {
+        replace(state, start, end, result, tick);
+        return start + points(result);
+    }
     virtual void restore(const State&, size_t, uint64_t) = 0;
     virtual void finish() {}
     virtual void focus() { require(identity() == target_, "Focused input changed"); }
