@@ -217,6 +217,43 @@ void benchmark_read(HWND hwnd, const std::string& backend, int count) {
         std::cout << us << '\n';
     }
 }
+void benchmark_expected() {
+    Fixture fixture(true);
+    require(fixture.hwnd() != nullptr, "Cannot create benchmark fixture");
+    Identity target{nullptr, fixture.hwnd(), GetCurrentProcessId()};
+    Config config;
+    Activity activity;
+    Automation automation;
+    FixtureWin32 native(target, config, activity);
+    auto text = wide(u8"前😀\n\nさんぽ。さんぽ。後ろ");
+    native.msg(WM_SETTEXT, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    auto original = native.read();
+    Com<IUIAutomationElement> element;
+    hr(automation.client->ElementFromHandle(fixture.hwnd(), element.put()), "Cannot obtain benchmark element");
+    auto pattern_value = pattern<IUIAutomationTextPattern>(element.get(), UIA_TextPatternId);
+    require(bool(pattern_value), "Benchmark TextPattern unavailable");
+    FixtureUia uia(target, config, activity, automation, element, element, pattern_value, {false, true, true});
+    for (bool selected : {false, true}) {
+        native.select(original, 4, selected ? 7 : 4);
+        auto expected = uia.read();
+        std::vector<int64_t> generic, specialized;
+        for (bool optimized : {false, true, true, false}) {
+            for (int sample = 0; sample < 12; ++sample) {
+                auto before = Clock::now();
+                if (optimized) require(uia.confirm_expected(expected) == ExpectedMatch::Match, "Expected benchmark mismatch");
+                else require(uia.read() == expected, "Generic benchmark mismatch");
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - before).count();
+                if (sample >= 2) (optimized ? specialized : generic).push_back(elapsed);
+            }
+        }
+        for (bool optimized : {false, true}) {
+            auto values = optimized ? specialized : generic;
+            std::sort(values.begin(), values.end());
+            std::cout << (selected ? "selection" : "caret") << " " << (optimized ? "expected" : "generic")
+                      << " median_ms=" << (values[9] + values[10]) / 2000.0 << " p95_ms=" << values[18] / 1000.0 << '\n';
+        }
+    }
+}
 void self_test() {
     auto text = wide(u8"前😀。\r\n\r\nさんぽ。後ろ");
     require(utf8(text) == u8"前😀。\r\n\r\nさんぽ。後ろ", "UTF roundtrip");
@@ -309,7 +346,32 @@ void self_test() {
                 uia.restore(uiastate, caret, activity.tick());
                 uiastate = uia.read();
                 require(uiastate.start == caret && uiastate.end == caret, "UIA caret range verification");
+                require(uia.confirm_expected(uiastate) == ExpectedMatch::Match, "Expected caret rejected");
+                auto wrong = uiastate;
+                wrong.start = wrong.end = caret == 0 ? 2 : 0;
+                require(uia.confirm_expected(wrong) == ExpectedMatch::PositionChanged, "Wrong expected caret accepted");
             }
+            // Nonempty ranges include surrogate pairs, blank lines and repeated
+            // text; textual prefixes must disambiguate equal-looking ranges.
+            auto repeated = wide(u8"前😀\n\nさんぽ。さんぽ。後ろ");
+            editor.msg(WM_SETTEXT, 0, reinterpret_cast<LPARAM>(repeated.c_str()));
+            auto repeated_state = editor.read();
+            for (const auto& units : std::vector<std::pair<size_t, size_t>>{{1, 3}, {3, 5}, {5, 8}, {9, 12}}) {
+                auto begin = point_offset(repeated_state.text, units.first), finish = point_offset(repeated_state.text, units.second);
+                editor.select(repeated_state, begin, finish);
+                auto live = uia.read();
+                require(uia.confirm_expected(live) == ExpectedMatch::Match, "Expected nonempty selection rejected");
+                auto collapsed_expected = live; collapsed_expected.end = collapsed_expected.start;
+                require(uia.confirm_expected(collapsed_expected) == ExpectedMatch::PositionChanged, "Nonempty selection accepted as caret");
+                auto wrong_text = live; wrong_text.text += L"x";
+                require(uia.confirm_expected(wrong_text) == ExpectedMatch::TextChanged, "Changed document accepted");
+            }
+            auto live = uia.read();
+            auto wrong_range = live; wrong_range.start = 4; wrong_range.end = 7;
+            require(uia.confirm_expected(wrong_range) == ExpectedMatch::PositionChanged, "Repeated text at wrong position accepted");
+            editor.select(repeated_state, 0, 0);
+            auto nonempty_expected = live;
+            require(uia.confirm_expected(nonempty_expected) == ExpectedMatch::PositionChanged, "Caret accepted as nonempty selection");
             Config event_config = config;
             event_config.wait = "event";
             FixtureUia notified(target, event_config, activity, automation, element, element, text_pattern, {false, true, true});
@@ -387,6 +449,7 @@ int main(int argc, char** argv) {
     int status = 0;
     try {
         if (argc == 2 && std::string(argv[1]) == "--self-test") self_test();
+        else if (argc == 2 && std::string(argv[1]) == "--benchmark-expected") benchmark_expected();
         else if (argc == 2 && std::string(argv[1]) == "--benchmark-wait") {
             for (DWORD delay : {DWORD(2), DWORD(5), DWORD(10)}) {
                 for (bool precise : {false, true}) {

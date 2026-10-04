@@ -64,6 +64,7 @@ inline std::wstring bstr(BSTR value) {
     return result;
 }
 struct Pending : std::runtime_error { using std::runtime_error::runtime_error; };
+enum class ExpectedMatch { Match, TextChanged, PositionChanged };
 struct EventSignal {
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::atomic<uint64_t> notifications{0};
@@ -204,15 +205,18 @@ class UiaEditor : public Editor {
         require(bool(selected), "Cannot obtain caret or selection");
         return selected;
     }
-    State read_once(Com<IUIAutomationTextRange> doc = {}, std::wstring text = {}) {
-        // A wait probe supplies the document just read after a fresh focus
-        // check. Reuse that observation, but always reread at the end.
-        if (!doc) { focus(); doc = document(); text = get_text(doc.get()); }
+    void validate_label(const std::wstring& text) {
         if (focused_class_ == L"native-edit-context" && !text.empty()) {
             BSTR name = nullptr;
             hr(focused_->get_CurrentName(&name), "Cannot read editor accessibility label");
             require(text != normalize(bstr(name)), "VS Code/Monaco is exposing a label; enable editor.accessibilitySupport");
         }
+    }
+    State read_once() {
+        focus();
+        auto doc = document();
+        auto text = get_text(doc.get());
+        validate_label(text);
         bool empty = false;
         auto selected = selection(&empty);
         auto prefix = clone(doc.get());
@@ -233,6 +237,63 @@ class UiaEditor : public Editor {
         anchor_ = selected;
         anchor_state_ = state;
         return state;
+    }
+    ExpectedMatch expected_once(const State& expected, Com<IUIAutomationTextRange> doc = {}) {
+        Stage timing("uia_expected_check");
+        // Caller has just checked focus. A supplied document has already
+        // matched expected.text in this probe; final text/focus checks remain.
+        if (!doc) {
+            doc = document();
+            if (get_text(doc.get()) != expected.text) { focus(); return ExpectedMatch::TextChanged; }
+        }
+        validate_label(expected.text);
+        auto a = unit_offset(expected.text, expected.start), b = unit_offset(expected.text, expected.end);
+        require(a <= b, "Invalid expected selection");
+        Com<IUIAutomationTextRange> selected;
+        bool correct = true;
+        if (a != b) {
+            // A nonempty expected selection cannot be a caret. Read the
+            // live selection directly, without CompareEndpoints/GetCaretRange.
+            Com<IUIAutomationTextRangeArray> ranges;
+            hr(pattern_->GetSelection(ranges.put()), "Cannot obtain selection");
+            int count = 0;
+            if (ranges) hr(ranges->get_Length(&count), "Cannot obtain selection count");
+            require(count <= 1, "Multiple selections are not supported");
+            if (count == 1) hr(ranges->GetElement(0, selected.put()), "Cannot obtain selected range");
+            correct = selected && get_text(selected.get()) == expected.text.substr(a, b - a);
+        } else {
+            bool empty = false;
+            selected = selection(&empty);
+            correct = empty;
+        }
+        if (correct) {
+            auto prefix = clone(doc.get());
+            endpoint(prefix.get(), TextPatternRangeEndpoint_End, selected.get(), TextPatternRangeEndpoint_Start);
+            correct = get_text(prefix.get()) == expected.text.substr(0, a);
+            if (correct && a != b) {
+                endpoint(prefix.get(), TextPatternRangeEndpoint_End, selected.get(), TextPatternRangeEndpoint_End);
+                correct = get_text(prefix.get()) == expected.text.substr(0, b);
+            }
+        }
+        // Never accept cached endpoints alone. Repeated text and providers
+        // with unusual Character units still require both textual prefixes.
+        if (get_text(document().get()) != expected.text) throw Pending("Document changed while checking expected state");
+        focus();
+        if (!correct) return ExpectedMatch::PositionChanged;
+        anchor_ = selected;
+        anchor_state_ = expected;
+        return ExpectedMatch::Match;
+    }
+    ExpectedMatch expected_stable(const State& expected) {
+        auto deadline = Clock::now() + std::chrono::milliseconds(500);
+        while (true) {
+            try { return expected_once(expected); }
+            catch (const Pending&) {
+                focus();
+                require(Clock::now() < deadline, "UIA expected state did not stabilize");
+                pause(10);
+            }
+        }
     }
     bool matches(IUIAutomationTextRange* doc, IUIAutomationTextRange* range, const State& state, size_t start, size_t end) {
         auto a = unit_offset(state.text, start), b = unit_offset(state.text, end);
@@ -397,6 +458,10 @@ public:
             }
         }
     }
+    ExpectedMatch confirm_expected(const State& expected) {
+        focus();
+        return expected_stable(expected);
+    }
     size_t replace_positioned(const State& state, size_t start, size_t end,
                               const std::wstring& result, uint64_t tick, size_t caret) override {
         auto inserted = start + points(result);
@@ -427,7 +492,7 @@ public:
         {
             Stage preparation("uia_prepare");
             guard(tick); writable(); input_ready(target_.focus);
-            require(read() == state, "Document or selection changed before replacement");
+            require(expected_stable(state) == ExpectedMatch::Match, "Document or selection changed before replacement");
         }
         auto selected = range_for(state, start, end);
         guard(tick);
@@ -438,9 +503,9 @@ public:
             auto deadline = Clock::now() + std::chrono::milliseconds(std::min<uint64_t>(config_.timeout_ms, 2000));
             while (true) {
                 guard(tick);
-                auto actual = read();
-                if (actual == wanted) break;
-                require(actual.text == state.text && Clock::now() < deadline, "Selection did not stabilize; text was not sent");
+                auto actual = expected_stable(wanted);
+                if (actual == ExpectedMatch::Match) break;
+                require(actual != ExpectedMatch::TextChanged && Clock::now() < deadline, "Selection did not stabilize; text was not sent");
                 pause(10);
             }
         }
@@ -451,7 +516,7 @@ public:
             Stage ime_timing("ime_disable");
             ime_ = std::make_unique<ImeSession>(target_);
             ime_->disable();
-            require(read() == wanted && activity_.tick() == tick, "State changed during IME switch; text was not sent");
+            require(confirm_expected(wanted) == ExpectedMatch::Match && activity_.tick() == tick, "State changed during IME switch; text was not sent");
         }
         // One batch; never delete first, retry partial input, or fall back.
         Stage send_timing("send_input");
@@ -489,14 +554,14 @@ public:
                 if (text == expected.text) {
                     metrics.text_match();
                     { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); focus(); }
-                    State actual;
+                    ExpectedMatch actual;
                     {
                         ReadbackMetrics::Slice part(metrics, ReadbackMetrics::StateCheck);
-                        actual = read_once(std::move(doc), std::move(text));
+                        actual = expected_once(expected, std::move(doc));
                     }
-                    if (actual == expected) { metrics.confirmed(); return actual; }
+                    if (actual == ExpectedMatch::Match) { metrics.confirmed(); return expected; }
                     if (metrics.enabled) {
-                        if (actual.text == expected.text) ++metrics.caret_misses;
+                        if (actual == ExpectedMatch::PositionChanged) ++metrics.caret_misses;
                         else ++metrics.unstable;
                     }
                 } else if (metrics.enabled) ++metrics.text_misses;
