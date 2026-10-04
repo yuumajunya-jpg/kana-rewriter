@@ -9,6 +9,14 @@ import statistics
 FIELDS = ("取得", "AI", "適用", "AI以外", "合計")
 SUMMARY = re.compile(r"時間集計: " + r" / ".join(
     re.escape(field) + r"=([0-9.]+)ms" for field in FIELDS))
+NATIVE_READBACK = re.compile(r"(時間|計数): C\+\+/(uia_readback(?:_[a-z_]+)?)=([0-9.]+)(ms)? \((完了|中止)\)")
+
+
+def distribution(values):
+    values = sorted(values)
+    return {"median": round(statistics.median(values), 2),
+            "p95_nearest_rank": round(values[math.ceil(0.95 * len(values)) - 1], 2),
+            "min": min(values), "max": max(values)}
 
 
 def summarize(text):
@@ -17,11 +25,20 @@ def summarize(text):
     for index, field in enumerate(FIELDS):
         values = sorted(row[index] for row in rows)
         if values:
-            result["timings_ms"][field] = {
-                "median": round(statistics.median(values), 2),
-                "p95_nearest_rank": round(values[math.ceil(0.95 * len(values)) - 1], 2),
-                "min": min(values), "max": max(values),
-            }
+            result["timings_ms"][field] = distribution(values)
+    native = {}
+    for match in NATIVE_READBACK.finditer(text):
+        kind, name, value, unit, status = match.groups()
+        if (kind == "時間") != (unit == "ms"):
+            continue
+        category = "timings_ms" if kind == "時間" else "counts"
+        native.setdefault(status, {}).setdefault(category, {}).setdefault(name, []).append(float(value))
+    if native:
+        result["native_readback"] = {
+            status: {category: {name: {"samples": len(values), **distribution(values)}
+                                for name, values in metrics.items()}
+                     for category, metrics in categories.items()}
+            for status, categories in native.items()}
     return result
 
 

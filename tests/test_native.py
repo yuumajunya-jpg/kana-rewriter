@@ -63,6 +63,26 @@ class NativeAdapterTests(unittest.TestCase):
                                  editor_timeout_seconds=1))
         return desktop, patch("kana_rewriter.native.subprocess.Popen", side_effect=launch), processes
 
+    def test_readback_durations_and_counts_have_distinct_units(self):
+        for mode, status, confirmed in (("metrics", "完了", 1), ("metrics_failure", "中止", 0)):
+            with self.subTest(mode=mode):
+                desktop, peer, _ = self.peer(mode)
+                with peer:
+                    try:
+                        with self.assertLogs("kana_rewriter.timing", level="DEBUG") as logs:
+                            if confirmed:
+                                desktop.warmup()
+                            else:
+                                with self.assertRaisesRegex(RuntimeError, "Measured failure"):
+                                    desktop.warmup()
+                        messages = "\n".join(logs.output)
+                        self.assertIn(f"時間: C++/uia_readback_text_query=1.2ms ({status})", messages)
+                        self.assertIn(f"計数: C++/uia_readback_probes=5 ({status})", messages)
+                        self.assertIn(f"計数: C++/uia_readback_confirmed={confirmed} ({status})", messages)
+                        self.assertNotIn("uia_readback_probes=0.0ms", messages)
+                    finally:
+                        desktop.close()
+
     def test_capture_apply_caret_mapping_and_token_not_replayed(self):
         desktop, peer, processes = self.peer("normal")
         with peer:

@@ -92,6 +92,8 @@ struct Config {
     uint64_t timeout_ms = 5000, limit = 200000, initial_delay_ms = 0;
     bool timing = false;
 };
+// A count: name uses the numeric field as a count instead of microseconds.
+// The record layout remains compatible with existing KRN1 workers.
 struct Timing { std::string name; uint64_t us; };
 inline thread_local std::vector<Timing> timings;
 inline thread_local bool measure = false;

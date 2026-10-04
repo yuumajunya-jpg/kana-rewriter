@@ -150,9 +150,13 @@ class Desktop:
                 raise ValueError("C++ワーカーの計測レコードが多すぎます")
             for _ in range(count):
                 name, microseconds = reader.text(), reader.number()
-                logging.getLogger("kana_rewriter.timing").debug(
-                    "時間: C++/%s=%.1fms (%s)", name, microseconds / 1000,
-                    "完了" if success else "中止")
+                logger = logging.getLogger("kana_rewriter.timing")
+                if name.startswith("count:"):
+                    logger.debug("計数: C++/%s=%d (%s)", name[6:], microseconds,
+                                 "完了" if success else "中止")
+                else:
+                    logger.debug("時間: C++/%s=%.1fms (%s)", name, microseconds / 1000,
+                                 "完了" if success else "中止")
             if success not in (0, 1):
                 raise ValueError("C++ワーカーの応答状態が不正です")
         except (OSError, EOFError, queue.Empty, queue.Full, ValueError, UnicodeError) as exc:

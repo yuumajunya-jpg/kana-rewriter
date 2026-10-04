@@ -301,10 +301,35 @@ void self_test() {
                 message(hwnd, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(changed.c_str()));
             });
             try {
+                measure = true;
+                timings.clear();
                 auto confirmed = notified.wait({changed, 0, 0}, Clock::now() + std::chrono::seconds(2));
                 require(confirmed.text == changed, "Notification readback failed");
-            } catch (...) { update.join(); throw; }
+            } catch (...) { measure = false; update.join(); throw; }
             update.join();
+            auto metric = [](const char* name) {
+                auto found = std::find_if(timings.begin(), timings.end(), [name](const Timing& value) { return value.name == name; });
+                require(found != timings.end(), "Missing readback metric");
+                return found->us;
+            };
+            require(metric("count:uia_readback_probes") >= 1 && metric("count:uia_readback_confirmed") == 1 &&
+                    metric("count:uia_readback_text_seen") == 1, "Successful readback counts");
+            require(metric("uia_readback_first_text_match") <= metric("uia_readback_confirmed"), "Readback milestone order");
+            auto partition = metric("uia_readback_focus") + metric("uia_readback_text_query") +
+                             metric("uia_readback_state_check") + metric("uia_readback_poll_wait") + metric("uia_readback_other");
+            require(partition <= metric("uia_readback"), "Readback phases overlap");
+            // Correct text with a persistently wrong caret must still fail;
+            // metrics must survive that exception without fabricating success.
+            timings.clear();
+            rejected = false;
+            try { notified.wait({changed, 2, 2}, Clock::now() + std::chrono::milliseconds(20)); }
+            catch (...) { rejected = true; }
+            require(rejected && metric("count:uia_readback_caret_misses") >= 1 &&
+                    metric("count:uia_readback_confirmed") == 0, "Wrong caret accepted or failure metrics lost");
+            measure = false;
+            timings.clear();
+            notified.wait({changed, 0, 0}, Clock::now() + std::chrono::seconds(2));
+            require(timings.empty(), "Readback diagnostics emitted while disabled");
         }
         SetWindowLongPtrW(fixture.hwnd(), GWL_STYLE, GetWindowLongPtrW(fixture.hwnd(), GWL_STYLE) | ES_READONLY);
         rejected = false;

@@ -1,5 +1,6 @@
 #pragma once
 #include "platform.hpp"
+#include "readback_metrics.hpp"
 #include <uiautomation.h>
 #include <utility>
 
@@ -445,22 +446,43 @@ public:
     }
     State wait(const State& expected, Deadline deadline) override {
         Stage timing("uia_readback");
-        if (config_.initial_delay_ms) { focus(); pause(DWORD(config_.initial_delay_ms)); }
+        ReadbackMetrics metrics;
+        if (config_.initial_delay_ms) {
+            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); focus(); }
+            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::PollWait); pause(DWORD(config_.initial_delay_ms)); }
+        }
         size_t probes = 0;
         while (true) {
-            focus();
+            if (metrics.enabled) ++metrics.probes;
+            { ReadbackMetrics::Slice part(metrics, ReadbackMetrics::Focus); focus(); }
             try {
-                auto doc = document();
-                auto text = get_text(doc.get());
-                if (text == expected.text) {
-                    auto actual = read_once(std::move(doc), std::move(text));
-                    if (actual == expected) return actual;
+                Com<IUIAutomationTextRange> doc;
+                std::wstring text;
+                {
+                    ReadbackMetrics::Slice part(metrics, ReadbackMetrics::TextQuery);
+                    doc = document(); text = get_text(doc.get());
                 }
-            } catch (const Pending&) {}
+                if (text == expected.text) {
+                    metrics.text_match();
+                    State actual;
+                    {
+                        ReadbackMetrics::Slice part(metrics, ReadbackMetrics::StateCheck);
+                        actual = read_once(std::move(doc), std::move(text));
+                    }
+                    if (actual == expected) { metrics.confirmed(); return actual; }
+                    if (metrics.enabled) {
+                        if (actual.text == expected.text) ++metrics.caret_misses;
+                        else ++metrics.unstable;
+                    }
+                } else if (metrics.enabled) ++metrics.text_misses;
+            } catch (const Pending&) { if (metrics.enabled) ++metrics.unstable; }
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
             require(remaining > 0, "Cannot confirm input; edit will not be retried");
             auto delay = ++probes <= 2 ? 2 : probes <= 5 ? 5 : 10;
-            pause(DWORD(std::min<int64_t>(delay, remaining)));
+            {
+                ReadbackMetrics::Slice part(metrics, ReadbackMetrics::PollWait);
+                pause(DWORD(std::min<int64_t>(delay, remaining)));
+            }
         }
     }
     void restore(const State& state, size_t caret, uint64_t tick) override {

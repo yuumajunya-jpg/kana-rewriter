@@ -47,10 +47,19 @@ def main():
             payload.text("win32")
             for value in (10, 7, 7):
                 payload.number(value)
+        records = []
+        if command == 2 and mode in ("metrics", "metrics_failure"):
+            records = [("uia_readback_text_query", 1250), ("count:uia_readback_probes", 5),
+                       ("count:uia_readback_confirmed", int(mode == "metrics"))]
+            if mode == "metrics_failure":
+                message = "Measured failure"
         response = Writer()
         response.number(not message)
         response.text(message)
-        response.number(0)
+        response.number(len(records))
+        for name, value in records:
+            response.text(name)
+            response.number(value)
         response.data.extend(payload.data)
         sys.stdout.buffer.write(MAGIC + struct.pack("<I", len(response.data)) + response.data)
         sys.stdout.buffer.flush()
