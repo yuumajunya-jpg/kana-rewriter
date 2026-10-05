@@ -131,6 +131,6 @@ AIなしでPython版とC++版を比較する手順と実測値は[PYTHON_EDITOR_
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-最終確認ではWindowsで195テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。半角全角のRaw Inputは登録・解除と疑似通知を試験しており、実機でのキー操作は別途確認が必要です。
+最終確認ではWindowsで198テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。半角全角のRaw Inputは登録・解除と疑似通知を試験しており、実機でのキー操作は別途確認が必要です。
 
 資料一覧は[docs/README.md](docs/README.md)、初回GitHub公開の手順は[docs/GITHUB_PUBLISH.md](docs/GITHUB_PUBLISH.md)を参照してください。

@@ -89,7 +89,10 @@ class JapaneseKeyRelease(InputActivity):
         if not accepted:
             return
         with self.state_lock:
-            if event.flags & 1:  # RI_KEY_BREAK; independent of legacy Message/VK
+            # Some Japanese NLS packets report WM_KEYUP with Flags=0.
+            # Accept either release indicator after matching scan/device;
+            # never infer release from elapsed time or another key's event.
+            if event.flags & 1 or event.message in (0x0101, 0x0105):
                 self.breaks += 1
                 self.devices_held.discard(packet.header.device)
             else:

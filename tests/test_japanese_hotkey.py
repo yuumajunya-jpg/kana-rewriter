@@ -7,12 +7,14 @@ from unittest.mock import Mock, patch
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class JapaneseKeyReleaseTests(unittest.TestCase):
-    def event(self, monitor, message, vk=0xF3, scan=0x29, flags=0, device=1):
+    def event(self, monitor, message, vk=0xF3, scan=0x29, flags=0, device=1, raw_flags=None):
         from kana_rewriter.japanese_hotkey import RawPacket
         packet = RawPacket()
         packet.header.kind, packet.header.size, packet.header.device = 1, C.sizeof(packet), device
         packet.keyboard.scan, packet.keyboard.vk, packet.keyboard.message = scan, vk, message
         packet.keyboard.flags = flags | (1 if message in (0x0101, 0x0105) else 0)
+        if raw_flags is not None:
+            packet.keyboard.flags = raw_flags
         monitor.observe(packet)
         return packet
 
@@ -94,6 +96,33 @@ class JapaneseKeyReleaseTests(unittest.TestCase):
         self.event(monitor, 0x0100, vk=0x19, flags=1)
         monitor.wait_released()
         self.assertEqual((monitor.makes, monitor.breaks), (1, 1))
+
+    def test_reported_nls_keyup_with_zero_flags_is_release(self):
+        monitor = self.prepare()
+        # Exact user packet: SC029 / Flags=0 / VK_F4 / WM_KEYUP.
+        # Two successive conversions must not leave a latched held state.
+        for _ in range(2):
+            self.event(monitor, 0x0101, vk=0xF4, device=131152, raw_flags=0)
+            with patch("kana_rewriter.japanese_hotkey.poll_sleep") as sleep:
+                monitor.wait_released()
+            sleep.assert_not_called()
+        self.assertEqual((monitor.makes, monitor.breaks, monitor.held), (0, 2, False))
+
+    def test_system_keyup_with_zero_flags_releases_same_keyboard(self):
+        monitor = self.prepare()
+        self.event(monitor, 0x0104)
+        self.assertTrue(monitor.held)
+        self.event(monitor, 0x0105, vk=0xF4, raw_flags=0)
+        monitor.wait_released()
+        self.assertEqual((monitor.makes, monitor.breaks), (1, 1))
+
+    def test_message_keyup_does_not_bypass_scan_device_or_extension_checks(self):
+        monitor = self.prepare()
+        self.event(monitor, 0x0100)
+        for scan, flags, device in ((0x30, 0, 1), (0x29, 2, 1),
+                                    (0x29, 4, 1), (0x29, 0, 0), (0x29, 0, 2)):
+            self.event(monitor, 0x0101, scan=scan, device=device, raw_flags=flags)
+            self.assertTrue(monitor.held)
 
     def test_break_scancode_high_bit_is_normalized(self):
         monitor = self.prepare()
