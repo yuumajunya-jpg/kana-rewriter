@@ -95,6 +95,40 @@ class JapaneseKeyReleaseTests(unittest.TestCase):
         monitor.wait_released()
         self.assertEqual((monitor.makes, monitor.breaks), (1, 1))
 
+    def test_break_scancode_high_bit_is_normalized(self):
+        monitor = self.prepare()
+        self.event(monitor, 0x0100)
+        self.event(monitor, 0x0101, scan=0xA9, vk=0xF4)
+        monitor.wait_released()
+        self.assertEqual((monitor.makes, monitor.breaks), (1, 1))
+
+    def test_empty_scan_recovers_only_mapped_half_width_key(self):
+        from kana_rewriter.japanese_hotkey import user
+        monitor = self.prepare()
+        self.event(monitor, 0x0100)
+        with patch.object(user, "MapVirtualKeyW", return_value=0x29) as mapping:
+            self.event(monitor, 0x0101, scan=0, vk=0xF4)
+        mapping.assert_called_once_with(0xF4, 4)
+        monitor.wait_released()
+
+    def test_unmapped_or_other_empty_scan_cannot_release_key(self):
+        from kana_rewriter.japanese_hotkey import user
+        monitor = self.prepare()
+        self.event(monitor, 0x0100)
+        with patch.object(user, "MapVirtualKeyW", return_value=0) as mapping:
+            self.event(monitor, 0x0101, scan=0, vk=0xF4)
+            self.event(monitor, 0x0101, scan=0, vk=0x41)
+        mapping.assert_called_once_with(0xF4, 4)
+        self.assertTrue(monitor.held)
+
+    def test_extended_high_bit_or_other_break_cannot_release_key(self):
+        monitor = self.prepare()
+        self.event(monitor, 0x0100)
+        for scan, flags, device in ((0xA9, 2, 1), (0xA9, 4, 1),
+                                    (0xA9, 0, 2), (0xA9, 0, 0), (0xAA, 0, 1)):
+            self.event(monitor, 0x0101, scan=scan, flags=flags, device=device)
+            self.assertTrue(monitor.held)
+
     def test_raw_packet_is_read_in_two_calls_and_validated(self):
         from kana_rewriter.japanese_hotkey import user, W
         monitor = self.prepare()

@@ -53,6 +53,8 @@ user.DispatchMessageW.restype = W.LPARAM
 user.RegisterRawInputDevices.argtypes = [C.POINTER(RawDevice), W.UINT, W.UINT]
 user.GetRawInputData.argtypes = [W.HANDLE, W.UINT, C.c_void_p, C.POINTER(W.UINT), W.UINT]
 user.GetRawInputData.restype = W.UINT
+user.MapVirtualKeyW.argtypes = [W.UINT, W.UINT]
+user.MapVirtualKeyW.restype = W.UINT
 
 
 class JapaneseKeyRelease(InputActivity):
@@ -69,8 +71,22 @@ class JapaneseKeyRelease(InputActivity):
 
     def observe(self, packet):
         event = packet.keyboard
-        if (packet.header.kind != 1 or not packet.header.device or
-                event.scan != 0x29 or event.flags & (2 | 4)):
+        if packet.header.kind != 1:
+            return
+        # Match Microsoft's RAWKEYBOARD sample: strip the break bit from
+        # MakeCode, and recover an absent scan code with MAPVK_VK_TO_VSC_EX.
+        # Keep the fallback restricted to half/full-width virtual keys.
+        scan = event.scan & 0x7F if event.scan <= 0xFF else event.scan
+        if not event.scan and event.vk in (0xF3, 0xF4, 0x19):
+            scan = user.MapVirtualKeyW(event.vk, 4)
+        candidate = scan == 0x29 or event.vk in (0xF3, 0xF4, 0x19)
+        accepted = bool(packet.header.device and scan == 0x29 and not event.flags & (2 | 4))
+        if candidate:
+            logger.debug("半角全角Raw通知: scan=0x%04X / 正規化=0x%04X / "
+                         "flags=0x%04X / vk=0x%02X / message=0x%04X / "
+                         "device=%s / 採用=%s", event.scan, scan, event.flags,
+                         event.vk, event.message, packet.header.device, accepted)
+        if not accepted:
             return
         with self.state_lock:
             if event.flags & 1:  # RI_KEY_BREAK; independent of legacy Message/VK
