@@ -37,6 +37,24 @@ model_format = "jinen_v2"
 
 v2の入力はプロンプト全体をNFKC正規化します。`model_format`も必ずv2に合わせてください。モデルの比較・入力形式は[MODELS.md](MODELS.md)を参照してください。モデルファイルはこのリポジトリに含めません。
 
+### jinen-v2-smallを使う場合
+
+small版のQ5_K_M（約81.1MB）も同じPython環境で利用できます。[配布元](https://huggingface.co/togatogah/jinen-v2-small.gguf)から次のコマンドで取得します。
+
+```cmd
+.\.venv\Scripts\hf.exe download togatogah/jinen-v2-small.gguf jinen-v2-small-Q5_K_M.gguf --revision 3461d0573ab447985badde3174165b967d06076c --local-dir models
+certutil -hashfile models\jinen-v2-small-Q5_K_M.gguf SHA256
+```
+
+ローカルに取得済みのファイルで確認したSHA256: `80482707513d6b67dafc31774371cf95d765542abf8d74eebf5f32f92d788bd3`。`config.toml`を次の組み合わせに変更して再起動します。
+
+```toml
+model_path = "models/jinen-v2-small-Q5_K_M.gguf"
+model_format = "jinen_v2"
+```
+
+xsmallとsmallで入力形式は同じです。これまでの速度計測はxsmallで行っているため、smallの速度・精度は同じ結果とは限りません。
+
 ## 動作確認と起動
 
 入力欄を操作せずに変換を確認します。以下は文脈による変換を確認するための入力例です。出力はモデル・設定により変わります。
@@ -63,6 +81,15 @@ v2の入力はプロンプト全体をNFKC正規化します。`model_format`も
 例: `さんぽ。│`にCtrl+Enter → `散歩。│`。句読点は保持し、文字数の変化を考慮してカーソルを戻します。
 
 `--config`を省略すると`config.toml`は読み込まず、プログラム内の既定値を使います。その場合の変換キーはCtrl+Alt+K / Ctrl+Alt+Jです。キーは設定で変更できます。他アプリと競合すると起動を中止します。
+
+日本語キーボードの半角／全角キーも指定できます。`config.toml`で次のように設定し、再起動してください。
+
+```toml
+hotkey_line = "半角全角"
+hotkey_selection = "Shift+半角全角"
+```
+
+`半角/全角`、`半角／全角`、`HankakuZenkaku`、`ZenkakuHankaku`も同じキー名として扱います。単独でもCtrl・Alt・Shift・Winとの組み合わせでも指定できます。IME状態によって変わる2種類のキーコードを登録し、どちらも同じ変換操作へ割り当てます。登録競合時は起動を中止します。実際のキー入力とIMEの挙動は日本語キーボードの環境で確認してください。
 
 ## 設定・対応範囲
 
@@ -102,6 +129,6 @@ AIなしでPython版とC++版を比較する手順と実測値は[PYTHON_EDITOR_
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-最終確認ではWindowsで176テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。
+最終確認ではWindowsで180テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。
 
 資料一覧は[docs/README.md](docs/README.md)、初回GitHub公開の手順は[docs/GITHUB_PUBLISH.md](docs/GITHUB_PUBLISH.md)を参照してください。

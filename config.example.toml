@@ -8,6 +8,8 @@ stop_at_kanji = true # Kの走査を漢字で止める
 trailing_punctuation = "。、？！?!,.，．" # カーソル直前で飛ばして保持する記号。区切りとは別設定
 hotkey_line = "Ctrl+Enter" # カーソル左の区切りまで変換
 hotkey_selection = "Ctrl+Shift+Enter" # 選択範囲を変換
+# 日本語キーボードでは上の2行を "半角全角" / "Shift+半角全角" に変更可能
+# "半角/全角"、"HankakuZenkaku"なども同じキー。設定変更後は再起動
 hotkey_quit = "" # 任意の終了キー。例: "Ctrl+Alt+Q"。空文字列なら登録しない
 edit_backend = "auto" # auto: 標準Edit/RichEditはWin32、それ以外はUIA。clipboardで旧方式
 editor_worker = "python" # C++版をビルドして比較する場合は "native"。推論バックエンドとは独立

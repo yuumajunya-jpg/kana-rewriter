@@ -23,6 +23,64 @@ class HotkeyTests(unittest.TestCase):
             binding = parse_hotkey(text)
             self.assertEqual((binding.modifiers, binding.key), (modifiers, key))
 
+    def test_hankaku_zenkaku_aliases_and_unmodified_binding(self):
+        for name in ("半角全角", "半角/全角", "半角／全角", "HankakuZenkaku", "ZenkakuHankaku"):
+            with self.subTest(name=name):
+                binding = parse_hotkey(name)
+                self.assertEqual((binding.modifiers, binding.keys, binding.label),
+                                 (0, (0xF3, 0xF4), "半角全角"))
+                shifted = parse_hotkey("Shift+" + name)
+                self.assertEqual((shifted.modifiers, shifted.keys, shifted.label),
+                                 (4, (0xF3, 0xF4), "Shift+半角全角"))
+        self.assertEqual(parse_hotkey("Ctrl+Enter").keys, (0x0D,))
+
+    def test_hankaku_zenkaku_alias_duplicates_are_rejected(self):
+        with self.assertRaises(ValueError):
+            Config(hotkey_line="半角全角", hotkey_selection="HankakuZenkaku")
+        Config(hotkey_line="半角全角", hotkey_selection="Shift+半角全角")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows only")
+    def test_japanese_alternate_codes_dispatch_and_pass_both_release_keys(self):
+        from kana_rewriter.__main__ import run_windows
+        from kana_rewriter import winapi as win
+        for worker in ("python", "native"):
+            for action in (1, 2):
+                with self.subTest(worker=worker, action=action):
+                    identifiers = iter((action + 10, 13))
+                    def next_message(pointer, *args):
+                        message = ctypes.cast(pointer, ctypes.POINTER(win.W.MSG)).contents
+                        message.message, message.wParam = 0x0312, next(identifiers)
+                        return 1
+                    options = {"hotkey_line": "F8", "hotkey_selection": "F9",
+                               "hotkey_quit": "Ctrl+半角全角", "editor_worker": worker}
+                    options["hotkey_line" if action == 1 else "hotkey_selection"] = "半角全角"
+                    with patch.object(win.user, "RegisterHotKey", return_value=1) as register, \
+                            patch.object(win.user, "UnregisterHotKey") as unregister, \
+                            patch.object(win.user, "PeekMessageW", side_effect=next_message), \
+                            patch.object(win, "MessageWaiter"), \
+                            patch("kana_rewriter." + ("direct" if worker == "python" else "native") + ".Desktop") as desktop, \
+                            patch("kana_rewriter.__main__.ThreadPoolExecutor"), patch("builtins.print"):
+                        self.assertEqual(run_windows(Mock(), Config(**options)), 0)
+                    desktop.return_value.capture.assert_called_once_with(
+                        "line" if action == 1 else "selection", 1000, trigger_keys=(0xF3, 0xF4))
+                    self.assertIn(call(None, action, 0x4000, 0xF3), register.call_args_list)
+                    self.assertIn(call(None, action + 10, 0x4000, 0xF4), register.call_args_list)
+                    self.assertEqual(unregister.call_count, 5)
+                    desktop.return_value.close.assert_called_once()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows only")
+    def test_partial_japanese_registration_failure_releases_first_code(self):
+        from kana_rewriter.__main__ import run_windows
+        from kana_rewriter import winapi as win
+        with patch.object(win.user, "RegisterHotKey", side_effect=[1, 0]), \
+                patch.object(win.user, "UnregisterHotKey") as unregister, \
+                patch("kana_rewriter.direct.Desktop") as desktop, \
+                patch("kana_rewriter.__main__.ThreadPoolExecutor"):
+            with self.assertRaisesRegex(RuntimeError, "登録できません"):
+                run_windows(Mock(), Config(hotkey_line="半角全角"))
+        unregister.assert_called_once_with(None, 1)
+        desktop.return_value.close.assert_called_once()
+
     def test_invalid_bindings(self):
         for value in (None, 1, "", "Ctrl", "Ctrl+Control+K", "Ctrl+K+J", "K",
                       "Ctrl++K", "Ctrl+Unknown", "F0", "F25", "Ctrl+F12"):

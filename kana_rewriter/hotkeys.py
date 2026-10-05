@@ -8,6 +8,7 @@ NAMED_KEYS = {"space": 0x20, "enter": 0x0D, "tab": 0x09, "escape": 0x1B,
               "backspace": 0x08, "insert": 0x2D, "delete": 0x2E,
               "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
               "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28}
+HANKAKU_ZENKAKU = {"半角全角", "半角/全角", "半角／全角", "hankakuzenkaku", "zenkakuhankaku"}
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,12 @@ class Hotkey:
     modifiers: int
     key: int
     label: str
+
+    @property
+    def keys(self):
+        # Japanese NLS processing can expose the same physical key as either
+        # half-width or full-width depending on the IME state.
+        return (0xF3, 0xF4) if self.key == 0xF3 else (self.key,)
 
 
 def parse_hotkey(value: str) -> Hotkey:
@@ -33,7 +40,10 @@ def parse_hotkey(value: str) -> Hotkey:
             continue
         if key is not None:
             raise ValueError("ショートカットの主キーは1つだけ指定してください")
-        if len(token) == 1 and token in "abcdefghijklmnopqrstuvwxyz0123456789":
+        if token in HANKAKU_ZENKAKU:
+            key = 0xF3
+            token = "半角全角"
+        elif len(token) == 1 and token in "abcdefghijklmnopqrstuvwxyz0123456789":
             key = ord(token.upper())
         elif token in NAMED_KEYS:
             key = NAMED_KEYS[token]
@@ -48,7 +58,7 @@ def parse_hotkey(value: str) -> Hotkey:
         key_label = token.upper() if len(token) == 1 or token.startswith("f") and token[1:].isdigit() else token.title()
     if key is None:
         raise ValueError("ショートカットに主キーを指定してください")
-    if not modifiers and not 0x70 <= key <= 0x87:
+    if not modifiers and not (0x70 <= key <= 0x87 or key == 0xF3):
         raise ValueError("文字キーなどにはCtrl・Alt・Shift・Winのいずれかを組み合わせてください")
     labels = [label for flag, label in ((2, "Ctrl"), (1, "Alt"), (4, "Shift"), (8, "Win"))
               if modifiers & flag]

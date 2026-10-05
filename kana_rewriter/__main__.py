@@ -102,6 +102,7 @@ def run_windows(converter, config, debug=False, timings=False):
     if config.hotkey_quit:
         bindings[3] = parse_hotkey(config.hotkey_quit)
     registered = []
+    actions = {}
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
     if config.edit_backend == "clipboard":
@@ -119,9 +120,12 @@ def run_windows(converter, config, debug=False, timings=False):
     try:
         waiter = MessageWaiter()
         for ident, binding in bindings.items():
-            if not user.RegisterHotKey(None, ident, 0x4000 | binding.modifiers, binding.key):
-                raise RuntimeError(f"ショートカット {binding.label} を登録できません。他アプリとの競合やOSの予約キーを確認してください")
-            registered.append(ident)
+            for index, key in enumerate(binding.keys):
+                registration = ident + index * 10
+                if not user.RegisterHotKey(None, registration, 0x4000 | binding.modifiers, key):
+                    raise RuntimeError(f"ショートカット {binding.label} を登録できません。他アプリとの競合やOSの予約キーを確認してください")
+                registered.append(registration)
+                actions[registration] = ident
         if config.edit_backend != "clipboard":
             desktop.warmup()
         flush_logs()
@@ -131,14 +135,15 @@ def run_windows(converter, config, debug=False, timings=False):
         message = W.MSG()
         while True:
             while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
-                if message.message == 0x0312 and message.wParam == 3 and 3 in bindings:
+                action = actions.get(message.wParam) if message.message == 0x0312 else None
+                if action == 3:
                     print("終了します", flush=True)
                     return 0
-                if message.message == 0x0312 and message.wParam in (1, 2) and pending is None:
+                if action in (1, 2) and pending is None:
                     try:
                         started = time.perf_counter()
-                        captured = desktop.capture("line" if message.wParam == 1 else "selection",
-                                                   config.max_chars, trigger_keys=(bindings[message.wParam].key,))
+                        captured = desktop.capture("line" if action == 1 else "selection",
+                                                   config.max_chars, trigger_keys=bindings[action].keys)
                         capture_seconds = time.perf_counter() - started
                         future = pool.submit(timed_conversion, converter, captured)
                         pending = (future, captured, started, capture_seconds)
