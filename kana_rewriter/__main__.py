@@ -103,6 +103,7 @@ def run_windows(converter, config, debug=False, timings=False):
         bindings[3] = parse_hotkey(config.hotkey_quit)
     registered = []
     actions = {}
+    japanese_release = None
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
     if config.edit_backend == "clipboard":
@@ -119,6 +120,9 @@ def run_windows(converter, config, debug=False, timings=False):
         desktop = Desktop(config, debug=debug, timings=timings)
     try:
         waiter = MessageWaiter()
+        if any(binding.key == 0xF3 for binding in bindings.values()):
+            from .japanese_hotkey import JapaneseKeyRelease
+            japanese_release = JapaneseKeyRelease().start()
         for ident, binding in bindings.items():
             for index, key in enumerate(binding.keys):
                 registration = ident + index * 10
@@ -142,22 +146,30 @@ def run_windows(converter, config, debug=False, timings=False):
                 if action in (1, 2) and pending is None:
                     try:
                         started = time.perf_counter()
+                        japanese_trigger = bindings[action].key == 0xF3
+                        if japanese_trigger and config.edit_backend == "clipboard":
+                            japanese_release.wait_released()
+                        # NLS pseudo-key states can remain latched even after
+                        # release. The parent checks physical release instead.
+                        trigger_keys = () if japanese_trigger else bindings[action].keys
                         captured = desktop.capture("line" if action == 1 else "selection",
-                                                   config.max_chars, trigger_keys=bindings[action].keys)
+                                                   config.max_chars, trigger_keys=trigger_keys)
                         capture_seconds = time.perf_counter() - started
                         future = pool.submit(timed_conversion, converter, captured)
-                        pending = (future, captured, started, capture_seconds)
+                        pending = (future, captured, started, capture_seconds, japanese_trigger)
                         future.add_done_callback(waiter.wake)
                         print("変換中…", flush=True)
                     except Exception as exc:
                         flush_logs()
                         print(f"中止: {exc}", flush=True)
             if pending is not None and pending[0].done():
-                future, captured, started, capture_seconds = pending
+                future, captured, started, capture_seconds, japanese_trigger = pending
                 pending = None
                 try:
                     result, inference_seconds = future.result()
                     applying = time.perf_counter()
+                    if japanese_trigger:
+                        japanese_release.wait_released()
                     changed = apply_result(desktop, captured, result)
                     finished = time.perf_counter()
                     logger.debug("時間集計: 取得=%.1fms / AI=%.1fms / 適用=%.1fms / AI以外=%.1fms / 合計=%.1fms",
@@ -177,7 +189,11 @@ def run_windows(converter, config, debug=False, timings=False):
         for ident in registered:
             user.UnregisterHotKey(None, ident)
         pool.shutdown(wait=True, cancel_futures=True)
-        desktop.close()
+        try:
+            desktop.close()
+        finally:
+            if japanese_release is not None:
+                japanese_release.close()
     return 0
 
 

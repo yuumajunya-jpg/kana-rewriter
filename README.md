@@ -91,6 +91,8 @@ hotkey_selection = "Shift+半角全角"
 
 `半角/全角`、`半角／全角`、`HankakuZenkaku`、`ZenkakuHankaku`も同じキー名として扱います。単独でもCtrl・Alt・Shift・Winとの組み合わせでも指定できます。IME状態によって変わる2種類のキーコードを登録し、どちらも同じ変換操作へ割り当てます。登録競合時は起動を中止します。実際のキー入力とIMEの挙動は日本語キーボードの環境で確認してください。
 
+半角全角は仮想キーの状態が解放後も残る場合があるため、物理キーの押下・解放を監視して適用前に確認します。`--debug` / `--timings`には`適用/半角全角キー解放待ち`を表示します。キーを押したままの場合は最大2秒で中止します。
+
 ## 設定・対応範囲
 
 全項目は[config.example.toml](config.example.toml)を参照してください。`editor_worker`はPython/C++の切り替え、`edit_backend`は入力欄の編集方式、`backend`はAIへの接続方式です。`--editor-worker python`または`native`で、その起動だけ設定を上書きできます。
@@ -129,6 +131,6 @@ AIなしでPython版とC++版を比較する手順と実測値は[PYTHON_EDITOR_
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-最終確認ではWindowsで180テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。
+最終確認ではWindowsで186テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。
 
 資料一覧は[docs/README.md](docs/README.md)、初回GitHub公開の手順は[docs/GITHUB_PUBLISH.md](docs/GITHUB_PUBLISH.md)を参照してください。

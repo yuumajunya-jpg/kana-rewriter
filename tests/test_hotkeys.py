@@ -58,15 +58,17 @@ class HotkeyTests(unittest.TestCase):
                             patch.object(win.user, "UnregisterHotKey") as unregister, \
                             patch.object(win.user, "PeekMessageW", side_effect=next_message), \
                             patch.object(win, "MessageWaiter"), \
+                            patch("kana_rewriter.japanese_hotkey.JapaneseKeyRelease") as release, \
                             patch("kana_rewriter." + ("direct" if worker == "python" else "native") + ".Desktop") as desktop, \
                             patch("kana_rewriter.__main__.ThreadPoolExecutor"), patch("builtins.print"):
                         self.assertEqual(run_windows(Mock(), Config(**options)), 0)
                     desktop.return_value.capture.assert_called_once_with(
-                        "line" if action == 1 else "selection", 1000, trigger_keys=(0xF3, 0xF4))
+                        "line" if action == 1 else "selection", 1000, trigger_keys=())
                     self.assertIn(call(None, action, 0x4000, 0xF3), register.call_args_list)
                     self.assertIn(call(None, action + 10, 0x4000, 0xF4), register.call_args_list)
                     self.assertEqual(unregister.call_count, 5)
                     desktop.return_value.close.assert_called_once()
+                    release.return_value.start.return_value.close.assert_called_once()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows only")
     def test_partial_japanese_registration_failure_releases_first_code(self):
@@ -75,11 +77,13 @@ class HotkeyTests(unittest.TestCase):
         with patch.object(win.user, "RegisterHotKey", side_effect=[1, 0]), \
                 patch.object(win.user, "UnregisterHotKey") as unregister, \
                 patch("kana_rewriter.direct.Desktop") as desktop, \
+                patch("kana_rewriter.japanese_hotkey.JapaneseKeyRelease") as release, \
                 patch("kana_rewriter.__main__.ThreadPoolExecutor"):
             with self.assertRaisesRegex(RuntimeError, "登録できません"):
                 run_windows(Mock(), Config(hotkey_line="半角全角"))
         unregister.assert_called_once_with(None, 1)
         desktop.return_value.close.assert_called_once()
+        release.return_value.start.return_value.close.assert_called_once()
 
     def test_invalid_bindings(self):
         for value in (None, 1, "", "Ctrl", "Ctrl+Control+K", "Ctrl+K+J", "K",

@@ -31,6 +31,8 @@ MOUSE_MESSAGES = frozenset((0x0201, 0x0204, 0x0207, 0x020B, 0x020A, 0x020E))
 
 
 class InputActivity:
+    hook_kinds = (13, 14)
+
     def __init__(self):
         self.counter = 0
         self.error = None
@@ -71,7 +73,7 @@ class InputActivity:
             user.PeekMessageW(C.byref(message), None, 0, 0, 0)  # create queue
             self.thread_id = kernel.GetCurrentThreadId()
             module = kernel.GetModuleHandleW(None)
-            for kind, callback in zip((13, 14), callbacks):
+            for kind, callback in zip(self.hook_kinds, callbacks):
                 hook = user.SetWindowsHookExW(kind, callback, module, 0)
                 if not hook:
                     raise C.WinError(C.get_last_error())
