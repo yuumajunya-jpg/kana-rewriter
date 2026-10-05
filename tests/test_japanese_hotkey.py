@@ -7,11 +7,14 @@ from unittest.mock import Mock, patch
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class JapaneseKeyReleaseTests(unittest.TestCase):
-    def event(self, monitor, message, vk=0xF3, scan=0x29, flags=0):
-        from kana_rewriter.japanese_hotkey import KeyboardEvent, user
-        event = KeyboardEvent(vk, scan, flags, 0, 0)
-        with patch.object(user, "CallNextHookEx", return_value=17):
-            self.assertEqual(monitor._keyboard(0, message, C.addressof(event)), 17)
+    def event(self, monitor, message, vk=0xF3, scan=0x29, flags=0, device=1):
+        from kana_rewriter.japanese_hotkey import RawPacket
+        packet = RawPacket()
+        packet.header.kind, packet.header.size, packet.header.device = 1, C.sizeof(packet), device
+        packet.keyboard.scan, packet.keyboard.vk, packet.keyboard.message = scan, vk, message
+        packet.keyboard.flags = flags | (1 if message in (0x0101, 0x0105) else 0)
+        monitor.observe(packet)
+        return packet
 
     def prepare(self):
         from kana_rewriter.japanese_hotkey import JapaneseKeyRelease
@@ -41,34 +44,97 @@ class JapaneseKeyReleaseTests(unittest.TestCase):
         sleep.assert_called_once_with(.005)
         self.assertFalse(monitor.held)
 
-    def test_unrelated_extended_and_injected_keys_cannot_release_held_key(self):
+    def test_unrelated_extended_and_device_less_keys_cannot_release_held_key(self):
         monitor = self.prepare()
         self.event(monitor, 0x0100)
-        for scan, flags in ((0x30, 0), (0x29, 1), (0x29, 0x10)):
+        for scan, flags in ((0x30, 0), (0x29, 2), (0x29, 4)):
             self.event(monitor, 0x0101, scan=scan, flags=flags)
             self.assertTrue(monitor.held)
+        self.event(monitor, 0x0101, device=0)
+        self.assertTrue(monitor.held)
         with patch("kana_rewriter.japanese_hotkey.time.monotonic", side_effect=[0, 3]):
             with self.assertRaisesRegex(RuntimeError, "離してください"):
                 monitor.wait_released()
 
-    def test_missing_physical_event_and_dead_hook_fail_closed(self):
+    def test_missing_physical_event_and_dead_monitor_fail_closed(self):
         monitor = self.prepare()
-        with self.assertRaisesRegex(RuntimeError, "物理入力"):
-            monitor.wait_released()
+        with patch("kana_rewriter.japanese_hotkey.time.monotonic", side_effect=[0, 3]):
+            with self.assertRaisesRegex(RuntimeError, "Raw Inputを確認"):
+                monitor.wait_released()
         self.event(monitor, 0x0101)
         monitor.thread.is_alive.return_value = False
         with self.assertRaisesRegex(RuntimeError, "入力監視"):
             monitor.wait_released()
 
-    def test_real_monitor_installs_only_keyboard_hook_and_closes(self):
-        from kana_rewriter.japanese_hotkey import JapaneseKeyRelease
+    def test_real_monitor_registers_raw_keyboard_without_hooks_and_closes(self):
+        from kana_rewriter.japanese_hotkey import JapaneseKeyRelease, user
         monitor = JapaneseKeyRelease()
         try:
-            monitor.start()
+            with patch.object(user, "SetWindowsHookExW") as hook:
+                monitor.start()
+            hook.assert_not_called()
             self.assertEqual(monitor.snapshot(), 0)
-            self.assertEqual(monitor.hook_kinds, (13,))
+            self.assertTrue(monitor.window)
         finally:
             monitor.close()
+        self.assertFalse(monitor.thread.is_alive())
+        self.assertIsNone(monitor.window)
+
+    def test_release_from_another_keyboard_cannot_clear_held_key(self):
+        monitor = self.prepare()
+        self.event(monitor, 0x0100, device=1)
+        self.event(monitor, 0x0101, device=2)
+        self.assertTrue(monitor.held)
+        self.event(monitor, 0x0101, device=1)
+        monitor.wait_released()
+
+    def test_raw_break_works_when_legacy_message_still_says_keydown(self):
+        monitor = self.prepare()
+        self.event(monitor, 0x0100)
+        self.event(monitor, 0x0100, vk=0x19, flags=1)
+        monitor.wait_released()
+        self.assertEqual((monitor.makes, monitor.breaks), (1, 1))
+
+    def test_raw_packet_is_read_in_two_calls_and_validated(self):
+        from kana_rewriter.japanese_hotkey import user, W
+        monitor = self.prepare()
+        packet = self.event(monitor, 0x0100)
+        packet.keyboard.flags = 1
+        data = bytes(packet)
+        def read(handle, command, buffer, size, header_size):
+            C.cast(size, C.POINTER(W.UINT)).contents.value = len(data)
+            if buffer is None:
+                return 0
+            C.memmove(buffer, data, len(data))
+            return len(data)
+        with patch.object(user, "GetRawInputData", side_effect=read) as get:
+            monitor.read_raw(123)
+        self.assertEqual(get.call_count, 2)
+        monitor.wait_released()
+        packet.header.size += 1
+        data = bytes(packet)
+        with patch.object(user, "GetRawInputData", side_effect=read):
+            with self.assertRaisesRegex(RuntimeError, "不完全"):
+                monitor.read_raw(123)
+
+    def test_raw_read_failure_stops_monitor_and_still_cleans_up_message(self):
+        from kana_rewriter.japanese_hotkey import user
+        monitor = self.prepare()
+        with patch.object(monitor, "read_raw", side_effect=RuntimeError("read failed")), \
+                patch.object(user, "DefWindowProcW", return_value=17) as cleanup:
+            self.assertEqual(monitor.window_proc(123, 0x00FF, 0, 456), 17)
+        cleanup.assert_called_once_with(123, 0x00FF, 0, 456)
+        with self.assertRaisesRegex(RuntimeError, "入力監視"):
+            monitor.wait_released()
+
+    def test_failed_raw_registration_destroys_window(self):
+        from kana_rewriter.japanese_hotkey import JapaneseKeyRelease, user
+        monitor = JapaneseKeyRelease()
+        with patch.object(user, "RegisterRawInputDevices", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "入力監視"):
+                monitor.start()
+        monitor.close()
+        self.assertIsNone(monitor.window)
         self.assertFalse(monitor.thread.is_alive())
 
     def test_event_loop_waits_after_ai_before_edit_for_both_workers(self):
