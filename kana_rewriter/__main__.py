@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--timings", action="store_true", help="本文を表示せず、編集完了後に工程時間を表示")
     parser.add_argument("--inspect", action="store_true", help="3秒後の入力欄の直接編集能力を表示（文字変更なし）")
     parser.add_argument("--editor-worker", choices=("python", "native"), help="設定ファイルの編集ワーカーを今回だけ上書き")
+    parser.add_argument("--auto-replace-on-ime-commit", action=argparse.BooleanOptionalAction, default=None,
+                        help="TSFによるEnter確定後の自動変換を今回だけ切り替え（Python直接編集のみ）")
     parser.add_argument("--benchmark-source", help="AIなし比較用の変換対象（完全一致時のみ置換）")
     parser.add_argument("--benchmark-result", help="AIなし比較用の固定変換結果")
     args = parser.parse_args()
@@ -59,8 +61,13 @@ def main():
         logger.setLevel(logging.DEBUG)
     try:
         config = Config.load(args.config) if args.config else Config()
+        overrides = {}
         if args.editor_worker:
-            config = replace(config, editor_worker=args.editor_worker)
+            overrides["editor_worker"] = args.editor_worker
+        if args.auto_replace_on_ime_commit is not None:
+            overrides["auto_replace_on_ime_commit"] = args.auto_replace_on_ime_commit
+        if overrides:
+            config = replace(config, **overrides)
         if benchmarking and config.edit_backend == "clipboard":
             raise RuntimeError("編集ワーカー比較には直接編集の設定を使用してください")
         converter = FixedConverter(args.benchmark_source, args.benchmark_result) if benchmarking else Converter(config)
@@ -104,6 +111,7 @@ def run_windows(converter, config, debug=False, timings=False):
     registered = []
     actions = {}
     japanese_release = None
+    auto_monitor = None
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
     if config.edit_backend == "clipboard":
@@ -132,10 +140,16 @@ def run_windows(converter, config, debug=False, timings=False):
                 actions[registration] = ident
         if config.edit_backend != "clipboard":
             desktop.warmup()
+        if config.auto_replace_on_ime_commit:
+            from .auto_ime import AutoImeMonitor
+            auto_monitor = AutoImeMonitor(config, waiter.wake)
+            auto_monitor.start()
         flush_logs()
         quit_label = f" / {bindings[3].label} = 終了" if 3 in bindings else ""
         print(f"起動: {bindings[1].label} = カーソル左の区切りまで / "
               f"{bindings[2].label} = 選択範囲{quit_label} / この端末でCtrl+C = 終了", flush=True)
+        if auto_monitor is not None:
+            print("IME確定後の自動変換: 有効（TSF・Enter確定／入力先に追従）", flush=True)
         message = W.MSG()
         while True:
             while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
@@ -144,6 +158,8 @@ def run_windows(converter, config, debug=False, timings=False):
                     print("終了します", flush=True)
                     return 0
                 if action in (1, 2) and pending is None:
+                    if auto_monitor is not None:
+                        auto_monitor.begin()
                     try:
                         started = time.perf_counter()
                         japanese_trigger = bindings[action].key == 0xF3
@@ -156,20 +172,42 @@ def run_windows(converter, config, debug=False, timings=False):
                                                    config.max_chars, trigger_keys=trigger_keys)
                         capture_seconds = time.perf_counter() - started
                         future = pool.submit(timed_conversion, converter, captured)
-                        pending = (future, captured, started, capture_seconds, japanese_trigger)
+                        pending = (future, captured, started, capture_seconds, japanese_trigger, None)
                         future.add_done_callback(waiter.wake)
                         print("変換中…", flush=True)
                     except Exception as exc:
+                        if auto_monitor is not None:
+                            auto_monitor.finish()
                         flush_logs()
                         print(f"中止: {exc}", flush=True)
+            if auto_monitor is not None and pending is None:
+                commit = auto_monitor.take()
+                if commit is not None and auto_monitor.begin(commit):
+                    try:
+                        from .auto_ime import capture_commit
+                        started = time.perf_counter()
+                        captured = capture_commit(desktop, auto_monitor, commit)
+                        capture_seconds = time.perf_counter() - started
+                        if not auto_monitor.valid(commit):
+                            raise RuntimeError("取得中に入力・フォーカスが変わったため中止しました")
+                        future = pool.submit(timed_conversion, converter, captured)
+                        pending = (future, captured, started, capture_seconds, False, commit)
+                        future.add_done_callback(waiter.wake)
+                        print("IME確定: 変換中…", flush=True)
+                    except Exception as exc:
+                        auto_monitor.finish()
+                        flush_logs()
+                        print(f"自動変換を中止: {exc}", flush=True)
             if pending is not None and pending[0].done():
-                future, captured, started, capture_seconds, japanese_trigger = pending
+                future, captured, started, capture_seconds, japanese_trigger, auto_commit = pending
                 pending = None
                 try:
                     result, inference_seconds = future.result()
                     applying = time.perf_counter()
                     if japanese_trigger:
                         japanese_release.wait_released()
+                    if auto_commit is not None and not auto_monitor.valid(auto_commit):
+                        raise RuntimeError("推論中に入力・フォーカスが変わったため自動変換を中止しました")
                     changed = apply_result(desktop, captured, result)
                     finished = time.perf_counter()
                     logger.debug("時間集計: 取得=%.1fms / AI=%.1fms / 適用=%.1fms / AI以外=%.1fms / 合計=%.1fms",
@@ -182,10 +220,17 @@ def run_windows(converter, config, debug=False, timings=False):
                 except Exception as exc:
                     flush_logs()
                     print(f"中止: {exc}", flush=True)
+                finally:
+                    if auto_monitor is not None:
+                        auto_monitor.finish()
+            if auto_monitor is not None:
+                flush_logs()
             waiter.wait()
     except KeyboardInterrupt:
         print("終了します", flush=True)
     finally:
+        if auto_monitor is not None:
+            auto_monitor.close()
         for ident in registered:
             user.UnregisterHotKey(None, ident)
         pool.shutdown(wait=True, cancel_futures=True)

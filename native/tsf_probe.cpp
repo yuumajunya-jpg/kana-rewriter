@@ -20,6 +20,7 @@ struct Packet {
 };
 struct Shared {
     volatile LONG write, read, dropped, stop, attached;
+    ULONGLONG control_hwnd;
     Packet packets[capacity];
 };
 enum Kind { Attached=1, Context=2, Editing=3, Candidate=4, EmptyEnd=5,
@@ -31,6 +32,8 @@ HANDLE host_mapping;
 Shared* host_shared;
 HHOOK host_hook;
 DWORD host_tid;
+HANDLE host_thread;
+bool host_poisoned=false;
 
 std::wstring mapping_name(DWORD pid) { return L"Local\\kana-tsf-probe-" + std::to_wstring(pid); }
 UINT message_id() { return RegisterWindowMessageW(L"kana-tsf-probe-control-v1"); }
@@ -42,6 +45,11 @@ LRESULT CALLBACK control_window(HWND, UINT, WPARAM, LPARAM);
 class Observer final : public ITfTextEditSink, public ITfThreadMgrEventSink, public ITfKeyTraceEventSink {
     std::atomic<ULONG> refs{1};
 public:
+    struct Busy {
+        unsigned& count;
+        explicit Busy(unsigned& value):count(value) { ++count; }
+        ~Busy() { --count; }
+    };
     HANDLE mapping=nullptr, owner=nullptr;
     Shared* shared=nullptr;
     HWND window=nullptr;
@@ -54,6 +62,7 @@ public:
     DWORD last_key=0;
     ULONGLONG key_tick=0;
     bool canceled=false;
+    bool failed=false;
     struct Range { ComPtr<IUnknown> identity; ComPtr<ITfRange> range; };
     std::vector<Range> previous;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
@@ -83,14 +92,17 @@ public:
         shared->packets[static_cast<unsigned>(w)%capacity]=packet;
         MemoryBarrier(); InterlockedExchange(&shared->write,w+1);
     }
-    bool stopping() const { return !shared || shared->stop || !owner || WaitForSingleObject(owner,0)!=WAIT_TIMEOUT; }
-    void clear_context() {
+    bool stopping() const { return failed || !shared || shared->stop || !owner || WaitForSingleObject(owner,0)!=WAIT_TIMEOUT; }
+    HRESULT clear_context() {
         previous.clear(); canceled=false; last_key=0; key_tick=0; ++generation;
-        if (context_source && text_cookie!=TF_INVALID_COOKIE) context_source->UnadviseSink(text_cookie);
+        HRESULT hr=S_OK;
+        if (context_source && text_cookie!=TF_INVALID_COOKIE) hr=context_source->UnadviseSink(text_cookie);
         text_cookie=TF_INVALID_COOKIE; context_source.Reset(); context.Reset();
+        if (FAILED(hr)) { failed=true; emit(Error,hr); }
+        return hr;
     }
     void focus(ITfDocumentMgr* doc) {
-        clear_context();
+        if (stopping() || FAILED(clear_context())) return;
         if (!doc) { emit(Context,S_FALSE); return; }
         HRESULT hr=doc->GetTop(&context);
         if (SUCCEEDED(hr) && context) hr=context.As(&context_source);
@@ -98,7 +110,7 @@ public:
             hr=context_source->AdviseSink(IID_ITfTextEditSink,static_cast<ITfTextEditSink*>(this),&text_cookie);
         emit(Context,hr);
     }
-    void refresh_focus() { ComPtr<ITfDocumentMgr> doc; if (manager && SUCCEEDED(manager->GetFocus(&doc))) focus(doc.Get()); }
+    void refresh_focus() { ComPtr<ITfDocumentMgr> doc; if (!stopping() && manager && SUCCEEDED(manager->GetFocus(&doc))) focus(doc.Get()); }
     HRESULT init(DWORD pid) {
         owner=OpenProcess(SYNCHRONIZE,FALSE,pid);
         mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapping_name(pid).c_str());
@@ -120,16 +132,20 @@ public:
         RegisterClassW(&wc);
         window=CreateWindowExW(0,wc.lpszClassName,L"",0,0,0,0,0,HWND_MESSAGE,nullptr,module_handle,this);
         if (!window) return HRESULT_FROM_WIN32(GetLastError());
-        SetTimer(window,1,250,nullptr);
+        shared->control_hwnd=reinterpret_cast<ULONGLONG>(window);
+        if (!SetTimer(window,1,250,nullptr)) { emit(Error,E_FAIL); return E_FAIL; }
         InterlockedExchange(&shared->attached,1); emit(Attached); refresh_focus(); return S_OK;
     }
     void detach() {
-        clear_context();
-        if (manager_source && manager_cookie!=TF_INVALID_COOKIE) manager_source->UnadviseSink(manager_cookie);
-        if (manager_source && key_cookie!=TF_INVALID_COOKIE) manager_source->UnadviseSink(key_cookie);
+        bool clean=!failed;
+        clean=SUCCEEDED(clear_context()) && clean;
+        if (manager_source && manager_cookie!=TF_INVALID_COOKIE)
+            clean=SUCCEEDED(manager_source->UnadviseSink(manager_cookie)) && clean;
+        if (manager_source && key_cookie!=TF_INVALID_COOKIE)
+            clean=SUCCEEDED(manager_source->UnadviseSink(key_cookie)) && clean;
         manager_cookie=key_cookie=TF_INVALID_COOKIE; manager_source.Reset(); manager.Reset();
-        emit(Detached);
-        if (shared) InterlockedExchange(&shared->attached,0);
+        emit(Detached,clean?S_OK:E_FAIL);
+        if (shared) { shared->control_hwnd=0; if (clean) InterlockedExchange(&shared->attached,0); }
         if (window) { KillTimer(window,1); DestroyWindow(window); window=nullptr; }
     }
     ~Observer() {
@@ -138,11 +154,18 @@ public:
         if (owner) CloseHandle(owner);
     }
     HRESULT STDMETHODCALLTYPE OnInitDocumentMgr(ITfDocumentMgr*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnUninitDocumentMgr(ITfDocumentMgr*) override { refresh_focus(); return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr* doc,ITfDocumentMgr*) override { focus(doc); return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnPushContext(ITfContext*) override { refresh_focus(); return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnPopContext(ITfContext*) override { refresh_focus(); return S_OK; }
+    HRESULT change_focus(ITfDocumentMgr* doc,bool refresh) {
+        Busy guard(busy);
+        try { if (refresh) refresh_focus(); else focus(doc); }
+        catch (...) { failed=true; emit(Error,E_FAIL); }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnUninitDocumentMgr(ITfDocumentMgr*) override { return change_focus(nullptr,true); }
+    HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr* doc,ITfDocumentMgr*) override { return change_focus(doc,false); }
+    HRESULT STDMETHODCALLTYPE OnPushContext(ITfContext*) override { return change_focus(nullptr,true); }
+    HRESULT STDMETHODCALLTYPE OnPopContext(ITfContext*) override { return change_focus(nullptr,true); }
     HRESULT STDMETHODCALLTYPE OnKeyTraceDown(WPARAM key,LPARAM) override {
+        if (stopping()) return S_OK;
         last_key=static_cast<DWORD>(key);
         key_tick=GetTickCount64();
         if (key==VK_ESCAPE && !previous.empty()) canceled=true;
@@ -204,8 +227,10 @@ LRESULT CALLBACK control_window(HWND hwnd,UINT message,WPARAM wparam,LPARAM lpar
         SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(data->lpCreateParams));
     }
     auto* state=reinterpret_cast<Observer*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
-    if (message==WM_TIMER && state && !state->busy && state->stopping()) {
-        observer=nullptr; state->detach(); state->Release(); return 0;
+    if ((message==WM_TIMER || message==WM_APP+1) && state && !state->busy && state->stopping()) {
+        observer=nullptr;
+        { Observer::Busy guard(state->busy); state->detach(); }
+        state->Release(); return 0;
     }
     return DefWindowProcW(hwnd,message,wparam,lparam);
 }
@@ -222,10 +247,12 @@ LRESULT CALLBACK ProbeHook(int code,WPARAM wparam,LPARAM lparam) {
             Observer* state=nullptr;
             try {
                 state=new Observer();
-                if (SUCCEEDED(state->init(static_cast<DWORD>(msg->wParam)))) observer=state;
-                else { state->detach(); state->Release(); }
+                HRESULT hr;
+                { Observer::Busy guard(state->busy); hr=state->init(static_cast<DWORD>(msg->wParam)); }
+                if (SUCCEEDED(hr)) observer=state;
+                else { { Observer::Busy guard(state->busy); state->detach(); } state->Release(); }
             } catch (...) {
-                if (state) { state->detach(); state->Release(); }
+                if (state) { { Observer::Busy guard(state->busy); state->detach(); } state->Release(); }
             }
         }
     }
@@ -233,16 +260,20 @@ LRESULT CALLBACK ProbeHook(int code,WPARAM wparam,LPARAM lparam) {
 }
 
 extern "C" __declspec(dllexport) BOOL WINAPI StartProbe(DWORD tid) {
+    if (!tid || host_poisoned) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     if (host_mapping) { SetLastError(ERROR_ALREADY_EXISTS); return FALSE; }
+    host_thread=OpenThread(SYNCHRONIZE,FALSE,tid);
+    if (!host_thread) return FALSE;
     host_mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(Shared),mapping_name(GetCurrentProcessId()).c_str());
-    if (!host_mapping) return FALSE;
+    if (!host_mapping) { CloseHandle(host_thread); host_thread=nullptr; return FALSE; }
     host_shared=static_cast<Shared*>(MapViewOfFile(host_mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(Shared)));
-    if (!host_shared) { CloseHandle(host_mapping); host_mapping=nullptr; return FALSE; }
+    if (!host_shared) { CloseHandle(host_mapping); host_mapping=nullptr; CloseHandle(host_thread); host_thread=nullptr; return FALSE; }
     ZeroMemory(host_shared,sizeof(Shared)); host_tid=tid;
     host_hook=SetWindowsHookExW(WH_GETMESSAGE,ProbeHook,module_handle,tid);
     if (!host_hook || !PostThreadMessageW(tid,message_id(),GetCurrentProcessId(),0)) {
         DWORD error=GetLastError(); if (host_hook) UnhookWindowsHookEx(host_hook);
         UnmapViewOfFile(host_shared); CloseHandle(host_mapping); host_shared=nullptr; host_mapping=nullptr;
+        CloseHandle(host_thread); host_thread=nullptr;
         SetLastError(error); return FALSE;
     }
     return TRUE;
@@ -261,12 +292,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI DroppedProbe() {
 extern "C" __declspec(dllexport) BOOL WINAPI StopProbe() {
     if (!host_shared) return TRUE;
     InterlockedExchange(&host_shared->stop,1);
+    if (host_shared->control_hwnd) PostMessageW(reinterpret_cast<HWND>(host_shared->control_hwnd),WM_APP+1,0,0);
     ULONGLONG deadline=GetTickCount64()+1500;
-    while (host_shared->attached && GetTickCount64()<deadline) Sleep(10);
-    BOOL clean=host_shared->attached==0;
+    while (host_shared->attached && WaitForSingleObject(host_thread,0)==WAIT_TIMEOUT && GetTickCount64()<deadline) Sleep(10);
+    BOOL clean=host_shared->attached==0 || WaitForSingleObject(host_thread,0)==WAIT_OBJECT_0;
+    if (!clean) host_poisoned=true;
     if (host_hook) UnhookWindowsHookEx(host_hook);
     host_hook=nullptr;
     UnmapViewOfFile(host_shared); CloseHandle(host_mapping); host_shared=nullptr; host_mapping=nullptr;
+    CloseHandle(host_thread); host_thread=nullptr;
     return clean;
 }
 BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) {

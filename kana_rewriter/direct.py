@@ -268,7 +268,7 @@ class Desktop:
         return self._call("capture", mode, max_chars, trigger_keys)
 
     def capture_commit(self, text, target, runtime=None):
-        return self._call("capture", "commit", self.config.max_chars, (), text, target, runtime)
+        return self._call("capture", "commit", self.config.max_chars, (0x0D,), text, target, runtime)
 
     def focus_runtime(self):
         return self._call("focus_runtime")

@@ -36,7 +36,7 @@ def probe_path():
 class NativeProbe:
     def __init__(self, tid, dll=None):
         if sys.platform != "win32" or C.sizeof(C.c_void_p) != 8:
-            raise RuntimeError("TSF試験は64ビットWindows/Python専用です")
+            raise RuntimeError("TSF監視は64ビットWindows/Python専用です")
         path = Path(dll) if dll else probe_path()
         if not path.is_file():
             raise RuntimeError("TSF監視DLLがありません。scripts/build_tsf_probe.ps1を実行してください")

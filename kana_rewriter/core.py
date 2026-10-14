@@ -34,6 +34,8 @@ class Config:
     hotkey_line: str = "Ctrl+Alt+K"
     hotkey_selection: str = "Ctrl+Alt+J"
     hotkey_quit: str = ""
+    auto_replace_on_ime_commit: bool = False
+    tsf_monitor_path: str = ""
     edit_backend: str = "auto"
     uia_ime_check: str = "auto"
     editor_timeout_seconds: float = 5
@@ -44,6 +46,12 @@ class Config:
     native_uia_wait: str = "poll"
 
     def __post_init__(self):
+        if type(self.auto_replace_on_ime_commit) is not bool:
+            raise ValueError("auto_replace_on_ime_commitは真偽値です")
+        if not isinstance(self.tsf_monitor_path, str):
+            raise ValueError("tsf_monitor_pathはDLLのパスまたは空文字列です")
+        if self.auto_replace_on_ime_commit and (self.editor_worker != "python" or self.edit_backend == "clipboard"):
+            raise ValueError("TSF自動変換はPythonの直接編集方式を使用してください")
         if self.editor_worker not in {"python", "native"}:
             raise ValueError("editor_workerはpythonまたはnativeです")
         if self.native_uia_wait not in {"poll", "event"}:
@@ -102,6 +110,10 @@ class Config:
             worker_path = Path(values["native_worker_path"])
             if not worker_path.is_absolute():
                 values["native_worker_path"] = str(file.parent / worker_path)
+        if values.get("tsf_monitor_path"):
+            monitor_path = Path(values["tsf_monitor_path"])
+            if not monitor_path.is_absolute():
+                values["tsf_monitor_path"] = str(file.parent / monitor_path)
         return cls(**values)
 
 

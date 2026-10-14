@@ -111,6 +111,17 @@ class NativeObserverTests(unittest.TestCase):
             time.sleep(.01)
         self.fail(f"Missing expected notification: {events}")
 
+    def test_target_exit_is_a_clean_stop_and_zero_tid_is_rejected(self):
+        with self.assertRaises(OSError):
+            NativeProbe(0).start()
+        with Fixture() as fixture:
+            probe = NativeProbe(fixture.tid).start()
+            self.wait_events(probe, lambda es: any(e["kind"] == 2 for e in es))
+            fixture.process.stdin.write("exit\n")
+            fixture.process.stdin.flush()
+            fixture.process.wait(timeout=3)
+            self.assertTrue(probe.close())
+
     def test_repeated_attach_detach_and_duplicate_host_rejected(self):
         with Fixture() as fixture:
             for _ in range(2):
