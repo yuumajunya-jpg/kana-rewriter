@@ -33,10 +33,15 @@ class TextState:
     end: int
 
 
-def make_capture(state, stamp, mode, config, token):
+def make_capture(state, stamp, mode, config, token, committed_text=None):
     if not 0 <= state.start <= state.end <= len(state.text):
         raise RuntimeError("入力欄の選択位置が不正です")
-    if mode == "line":
+    if mode == "commit":
+        if (not committed_text or state.start != state.end or state.end < len(committed_text)
+                or state.text[state.end - len(committed_text):state.end] != committed_text):
+            raise RuntimeError("TSF確定文字列と本文・カーソルが一致しません")
+        region = TextRegion(state.text[:state.end - len(committed_text)], committed_text, state.text[state.end:])
+    elif mode == "line":
         if state.start != state.end:
             raise RuntimeError("範囲が選択されています。選択範囲モードを使用してください")
         region = split_at_caret(state.text, state.end, config.conversion_delimiters,

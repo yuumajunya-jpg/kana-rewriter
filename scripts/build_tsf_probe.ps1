@@ -1,0 +1,20 @@
+param([string]$Compiler = "")
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $PSScriptRoot
+$output = Join-Path $root "build\tsf-probe"
+New-Item -ItemType Directory -Force -Path $output | Out-Null
+if (-not $Compiler) {
+    $Compiler = Join-Path $root "build\toolchain\llvm-mingw-20260922-ucrt-x86_64\bin\x86_64-w64-mingw32-clang++.exe"
+}
+if (-not (Test-Path -LiteralPath $Compiler)) { throw "64-bit MinGW/llvm-mingw compiler required: -Compiler <path>" }
+$dllName = "kana-tsf-probe-{0}.dll" -f [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfff")
+& $Compiler -std=c++17 -O2 -Wall -Wextra -shared (Join-Path $root "native\tsf_probe.cpp") `
+    -o (Join-Path $output $dllName) -lole32 -loleaut32 -luuid -luser32 -static
+if ($LASTEXITCODE -ne 0) { throw "TSF probe build failed" }
+& $Compiler -std=c++17 -O2 -Wall -Wextra (Join-Path $root "native\tsf_probe_fixture.cpp") `
+    -o (Join-Path $output "tsf-probe-fixture.exe") -lole32 -loleaut32 -luuid -luser32 -static
+if ($LASTEXITCODE -ne 0) { throw "TSF probe fixture build failed" }
+# A target keeps its observed DLL mapped until process exit. Publish a fresh
+# filename so rebuilding does not require closing the user's applications.
+@{ dll = $dllName } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output "latest.json") -Encoding utf8
+Write-Output (Join-Path $output $dllName)
