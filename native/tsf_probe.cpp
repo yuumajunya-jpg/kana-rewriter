@@ -1,4 +1,4 @@
-// Experimental, read-only, per-thread TSF observer. No IME registration.
+// Read-only, per-thread TSF observer. No IME registration.
 #define UNICODE
 #define _UNICODE
 #define NOMINMAX
@@ -15,7 +15,7 @@ using Microsoft::WRL::ComPtr;
 constexpr unsigned capacity = 64, text_limit = 1024;
 struct Packet {
     DWORD kind, pid, tid, hr, key, active;
-    ULONGLONG tick, hwnd, generation;
+    ULONGLONG tick, hwnd, generation, composition_tick;
     wchar_t text[text_limit];
 };
 struct Shared {
@@ -63,7 +63,11 @@ public:
     ULONGLONG key_tick=0;
     bool canceled=false;
     bool failed=false;
-    struct Range { ComPtr<IUnknown> identity; ComPtr<ITfRange> range; };
+    struct Range {
+        ComPtr<IUnknown> identity;
+        ComPtr<ITfRange> range;
+        ULONGLONG started=0;
+    };
     std::vector<Range> previous;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
         if (!result) return E_POINTER;
@@ -76,7 +80,8 @@ public:
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
     ULONG STDMETHODCALLTYPE Release() override { ULONG n=--refs; if (!n) delete this; return n; }
-    void emit(DWORD kind, HRESULT hr=S_OK, const std::wstring& text=L"", DWORD active=0) {
+    void emit(DWORD kind, HRESULT hr=S_OK, const std::wstring& text=L"", DWORD active=0,
+              ULONGLONG composition_tick=0) {
         if (!shared) return;
         LONG w=InterlockedCompareExchange(&shared->write,0,0);
         LONG r=InterlockedCompareExchange(&shared->read,0,0);
@@ -87,6 +92,7 @@ public:
         packet.hwnd=reinterpret_cast<ULONGLONG>(GetFocus()); packet.generation=generation;
         packet.key=(kind==Candidate && GetTickCount64()-key_tick>1500)?0:last_key;
         packet.active=active;
+        packet.composition_tick=composition_tick;
         if (text.size()>=text_limit) { packet.kind=Unsupported; packet.hr=ERROR_BUFFER_OVERFLOW; }
         else std::copy(text.begin(),text.end(),packet.text);
         shared->packets[static_cast<unsigned>(w)%capacity]=packet;
@@ -191,6 +197,10 @@ public:
             if (FAILED(view.As(&entry.identity)) || FAILED(view->GetRange(&range)) || FAILED(range->Clone(&entry.range))) {
                 emit(Error,E_FAIL); previous.clear(); return;
             }
+            auto old=std::find_if(previous.begin(),previous.end(),[&](const Range& item) {
+                return item.identity.Get()==entry.identity.Get();
+            });
+            entry.started=old==previous.end()?GetTickCount64():old->started;
             current.push_back(std::move(entry)); view.Reset();
         }
         if (hr!=S_FALSE) { emit(Error,hr); previous.clear(); return; }
@@ -215,7 +225,7 @@ public:
             if (!committed) { emit(Unsupported,FAILED(hr)?hr:S_FALSE); continue; }
             // A removed composition can also be cancellation. The Python consumer
             // requires an observed Enter and a matching live editor snapshot.
-            emit(Candidate,S_OK,std::wstring(buffer,count));
+            emit(Candidate,S_OK,std::wstring(buffer,count),0,old.started);
         }
         previous=std::move(current);
     }
@@ -259,6 +269,8 @@ LRESULT CALLBACK ProbeHook(int code,WPARAM wparam,LPARAM lparam) {
     return CallNextHookEx(nullptr,code,wparam,lparam);
 }
 
+// Check the packet layout before Python passes a buffer to PollProbe.
+extern "C" __declspec(dllexport) DWORD WINAPI ProbeProtocolVersion() { return 2; }
 extern "C" __declspec(dllexport) BOOL WINAPI StartProbe(DWORD tid) {
     if (!tid || host_poisoned) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     if (host_mapping) { SetLastError(ERROR_ALREADY_EXISTS); return FALSE; }

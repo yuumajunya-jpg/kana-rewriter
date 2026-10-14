@@ -6,89 +6,11 @@ from ctypes import wintypes as W
 from dataclasses import replace
 import json
 import logging
-from pathlib import Path
 import sys
 import time
 
 from .core import Config, Converter, apply_result
-from .text import reading_spans
-
-KINDS = {1: "attached", 2: "context", 3: "editing", 4: "commit_candidate",
-         5: "canceled_or_empty", 6: "error", 7: "detached", 8: "key", 9: "unsupported"}
-
-
-class Packet(C.Structure):
-    _fields_ = [(name, C.c_uint32) for name in ("kind", "pid", "tid", "hr", "key", "active")] + [
-        (name, C.c_uint64) for name in ("tick", "hwnd", "generation")] + [("text", C.c_wchar * 1024)]
-
-
-def probe_path():
-    directory = Path(__file__).resolve().parents[1] / "build/tsf-probe"
-    manifest = directory / "latest.json"
-    if manifest.is_file():
-        name = json.loads(manifest.read_text(encoding="utf-8-sig"))["dll"]
-        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".dll"):
-            raise RuntimeError("TSF監視DLLのビルド情報が不正です")
-        return directory / name
-    return directory / "kana-tsf-probe.dll"
-
-
-class NativeProbe:
-    def __init__(self, tid, dll=None):
-        if sys.platform != "win32" or C.sizeof(C.c_void_p) != 8:
-            raise RuntimeError("TSF監視は64ビットWindows/Python専用です")
-        path = Path(dll) if dll else probe_path()
-        if not path.is_file():
-            raise RuntimeError("TSF監視DLLがありません。scripts/build_tsf_probe.ps1を実行してください")
-        self.dll = C.WinDLL(str(path.resolve()), use_last_error=True)
-        self.dll.StartProbe.argtypes = [W.DWORD]
-        self.dll.StartProbe.restype = W.BOOL
-        self.dll.PollProbe.argtypes = [C.POINTER(Packet)]
-        self.dll.PollProbe.restype = W.BOOL
-        self.dll.DroppedProbe.restype = W.DWORD
-        self.dll.StopProbe.restype = W.BOOL
-        self.tid, self.started = tid, False
-
-    def start(self):
-        if not self.dll.StartProbe(self.tid):
-            raise C.WinError(C.get_last_error())
-        self.started = True
-        return self
-
-    def drain(self):
-        events = []
-        packet = Packet()
-        while self.dll.PollProbe(C.byref(packet)):
-            events.append({name: getattr(packet, name) for name, _ in Packet._fields_})
-        return events
-
-    def dropped(self):
-        return self.dll.DroppedProbe()
-
-    def close(self):
-        if self.started:
-            self.started = False
-            return bool(self.dll.StopProbe())
-        return True
-
-
-def eligible(event, now, target):
-    """A conservative trial gate; not a general composition classifier."""
-    if event["kind"] != 4:
-        return False, "not_candidate"
-    if event["key"] != 0x0D:
-        return False, "enter_not_observed"
-    if event["pid"] != target[2] or event["hwnd"] != target[1]:
-        return False, "focus_changed"
-    if not 0 <= now - event["tick"] <= 1500:
-        return False, "expired"
-    if not event["text"] or not any(reading_spans(event["text"])):
-        return False, "no_kana"
-    return True, "eligible"
-
-
-def invalidates(events):
-    return any(event["kind"] in (2, 3, 4, 5, 6, 7, 8, 9) for event in events)
+from .tsf import NativeProbe, KINDS, eligible, invalidates
 
 
 def main():

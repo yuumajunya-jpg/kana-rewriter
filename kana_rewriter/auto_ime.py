@@ -5,7 +5,7 @@ import os
 import threading
 import time
 
-from .tsf_probe import NativeProbe, KINDS, eligible, invalidates
+from .tsf import NativeProbe, KINDS, eligible, INPUT_EVENTS, COMMIT_MAX_AGE_MS
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,9 @@ class CommitState:
         self.pending = None
         self.busy = False
         self.closed = False
-        self.armed = False
-        self.saw_key = False
-        self.focus_tick = 0
+        # Accept only compositions that began after this field became eligible.
+        # The native observer owns composition history; Python owns this boundary.
+        self.accept_since = 0
 
     def track(self, focus, now=0):
         with self.lock:
@@ -51,42 +51,28 @@ class CommitState:
                 self.focus = focus
                 self.revision += 1
                 self.pending = None
-                self.armed = self.saw_key = False
-                self.focus_tick = now
+                self.accept_since = now
 
     def observe(self, events, now):
         with self.lock:
             for event in events:
-                if invalidates([event]):
+                if event["kind"] in INPUT_EVENTS:
                     self.revision += 1
                     self.pending = None
                 if self.closed or self.busy or self.focus is None:
                     continue
                 if event["tid"] != self.focus.tid:
                     continue
-                if event["tick"] < self.focus_tick:
-                    continue
-                if event["kind"] in (2, 5, 6, 7, 9):
-                    self.armed = self.saw_key = False
-                elif event["kind"] == 8:
-                    if event["key"] == 0x1B:
-                        self.saw_key = False
-                        self.armed = False
-                    elif event["key"] not in (0x0D, 0x10, 0x11, 0x12, 0x5B, 0x5C):
-                        self.saw_key = True
-                elif event["kind"] == 3 and event["active"] and self.saw_key:
-                    self.armed = True
                 valid, _ = eligible(event, now, self.focus.target)
-                if valid and self.armed:
+                if valid and self.accept_since <= event["composition_tick"] <= event["tick"]:
                     text = event["text"].replace("\r\n", "\n").replace("\r", "\n")
                     self.pending = Commit(text, self.focus, event["tick"], self.revision)
-                    self.armed = self.saw_key = False
 
     def take(self, now):
         with self.lock:
             commit, self.pending = self.pending, None
             if (not self.closed and not self.busy and commit is not None
-                    and 0 <= now - commit.tick <= 1500):
+                    and 0 <= now - commit.tick <= COMMIT_MAX_AGE_MS):
                 return commit
         return None
 
@@ -108,12 +94,12 @@ class CommitState:
             self.busy = True
             return True
 
-    def finish(self):
+    def finish(self, now):
         with self.lock:
             self.revision += 1
             self.pending = None
             self.busy = False
-            self.armed = self.saw_key = False
+            self.accept_since = max(self.accept_since, now)
 
     def close(self):
         with self.lock:
@@ -237,7 +223,7 @@ class AutoImeMonitor:
         return self.state.begin(commit)
 
     def finish(self):
-        self.state.finish()
+        self.state.finish(tick_count())
 
     def _run(self):
         probe = None

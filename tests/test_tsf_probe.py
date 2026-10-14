@@ -10,7 +10,20 @@ from unittest.mock import Mock, patch
 
 from kana_rewriter.core import Config, apply_result
 from kana_rewriter.editor import TextState, make_capture, replacement_plan
-from kana_rewriter.tsf_probe import NativeProbe, eligible, invalidates, probe_path
+from kana_rewriter.tsf import NativeProbe, eligible, invalidates, probe_path, PROTOCOL_VERSION
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows DLL")
+class ProtocolTests(unittest.TestCase):
+    def test_old_or_incompatible_dll_is_rejected_before_polling(self):
+        for version in (None, PROTOCOL_VERSION + 1):
+            dll = Mock()
+            dll.ProbeProtocolVersion = None if version is None else Mock(return_value=version)
+            with self.subTest(version=version), patch("kana_rewriter.tsf.C.WinDLL", return_value=dll), \
+                    patch.object(Path, "is_file", return_value=True), \
+                    self.assertRaisesRegex(RuntimeError, "再ビルド"):
+                NativeProbe(4, "old.dll")
+            dll.PollProbe.assert_not_called()
 
 
 class TrialGateTests(unittest.TestCase):
@@ -121,6 +134,26 @@ class NativeObserverTests(unittest.TestCase):
             fixture.process.stdin.flush()
             fixture.process.wait(timeout=3)
             self.assertTrue(probe.close())
+
+    def test_composition_start_survives_intermediate_edits(self):
+        with Fixture() as fixture:
+            probe = NativeProbe(fixture.tid).start()
+            try:
+                self.wait_events(probe, lambda es: any(e["kind"] == 2 for e in es))
+                fixture.command("begin")
+                events = self.wait_events(probe, lambda es: any(e["kind"] == 3 and e["active"] for e in es))
+                began = next(e["tick"] for e in events if e["kind"] == 3 and e["active"])
+                time.sleep(.03)
+                fixture.command("update")
+                self.wait_events(probe, lambda es: any(e["kind"] == 3 for e in es))
+                fixture.command("commit")
+                events = self.wait_events(probe, lambda es: any(e["kind"] == 4 for e in es))
+                commit = next(e for e in events if e["kind"] == 4)
+                self.assertGreater(commit["composition_tick"], 0)
+                self.assertLessEqual(commit["composition_tick"], began)
+                self.assertGreater(commit["tick"], began)
+            finally:
+                self.assertTrue(probe.close())
 
     def test_repeated_attach_detach_and_duplicate_host_rejected(self):
         with Fixture() as fixture:

@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from kana_rewriter.auto_ime import CommitState, Focus, AutoImeMonitor, tick_count
 from kana_rewriter.core import Config
-from kana_rewriter.tsf_probe import probe_path
+from kana_rewriter.tsf import probe_path
 
 
 FIELD = Focus((1, 2, 3), (10,), 4)
@@ -16,7 +16,7 @@ FIELD = Focus((1, 2, 3), (10,), 4)
 
 def event(kind, **values):
     return {**dict(kind=kind, pid=3, tid=4, hwnd=2, tick=100, key=13,
-                   active=0, hr=0, generation=1, text="さんぽ"), **values}
+                   active=0, hr=0, generation=1, composition_tick=90, text="さんぽ"), **values}
 
 
 def commit_events():
@@ -71,9 +71,9 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(self.state.take(500))
 
     def test_cancellation_and_notice_from_previous_field_do_not_trigger(self):
-        self.state.observe(commit_events()[:-1] + [event(5), event(4)], 100)
+        self.state.observe(commit_events()[:-1] + [event(5)], 100)
         self.assertIsNone(self.state.take(100))
-        self.state.track(Focus((1, 2, 3), (20,), 4))
+        self.state.track(Focus((1, 2, 3), (20,), 4), 110)
         self.state.observe([event(4)], 100)
         self.assertIsNone(self.state.take(100))
 
@@ -101,7 +101,7 @@ class StateTests(unittest.TestCase):
         self.state.begin()
         self.assertIsNone(self.state.take(100))
         self.state.observe(commit_events(), 110)
-        self.state.finish()
+        self.state.finish(110)
         self.assertIsNone(self.state.take(110))
         self.state.observe([event(4)], 120)
         self.assertIsNone(self.state.take(120))
@@ -119,16 +119,31 @@ class StateTests(unittest.TestCase):
         self.state.close()
         self.assertFalse(self.state.valid(commit))
         self.assertFalse(self.state.begin())
-        self.state.finish()
+        self.state.finish(110)
         self.state.observe(commit_events(), 100)
         self.assertIsNone(self.state.take(100))
 
-    def test_old_field_packets_and_enter_alone_cannot_arm_a_new_field(self):
+    def test_composition_started_in_old_field_is_rejected_even_if_commit_is_new(self):
         self.state.track(Focus(FIELD.target, (99,), FIELD.tid), 500)
         self.state.observe(commit_events(), 600)
         self.assertIsNone(self.state.take(600))
-        self.state.observe([event(8, tick=600), event(3, active=1, tick=600), event(4, tick=600)], 600)
+        self.state.observe([event(4, tick=600, composition_tick=400)], 600)
         self.assertIsNone(self.state.take(600))
+        self.state.observe([event(4, tick=700, composition_tick=650)], 700)
+        self.assertEqual(self.state.take(700).text, "さんぽ")
+
+    def test_native_candidate_does_not_require_replaying_keys_or_edit_history(self):
+        self.state.observe([event(4)], 100)
+        self.assertEqual(self.state.take(100).text, "さんぽ")
+
+    def test_composition_started_while_busy_is_not_replayed_after_finish(self):
+        self.state.begin()
+        self.state.observe([event(3, active=1)], 100)
+        self.state.finish(200)
+        self.state.observe([event(4, tick=300, composition_tick=150)], 300)
+        self.assertIsNone(self.state.take(300))
+        self.state.observe([event(4, tick=400, composition_tick=350)], 400)
+        self.assertIsNotNone(self.state.take(400))
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")

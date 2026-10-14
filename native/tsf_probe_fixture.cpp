@@ -125,6 +125,7 @@ public:
         ComPtr<ITfRange> range;
         HRESULT hr=(*composition)->GetRange(&range);
         if (FAILED(hr)) return hr;
+        if (operation=="update") return range->SetText(cookie,0,L"さんぽ",3);
         if (operation=="cancel") {
             hr=range->SetText(cookie,0,L"",0);
             if (FAILED(hr)) return hr;
