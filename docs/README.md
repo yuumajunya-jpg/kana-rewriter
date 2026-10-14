@@ -6,6 +6,7 @@
 |---|---|
 | [README](../README.md) | 導入・起動・基本操作・診断 |
 | [設定例](../config.example.toml) | 全設定項目 |
+| [Windows配布版](WINDOWS_DISTRIBUTION.md) | 既存Pythonで使うアプリ・TSF DLLのZIPの作成と利用 |
 | [編集処理の詳細](EDITOR_DETAILS.md) | 変換範囲・IME・中止条件・UIAの制約 |
 | [Python編集処理の比較](../PYTHON_EDITOR_COMPARISON.md) | 現行版の最適化・AIなし比較・手動試行 |
 | [モデル資料](../MODELS.md) | 調査時点の候補・固定GGUF・入力形式 |

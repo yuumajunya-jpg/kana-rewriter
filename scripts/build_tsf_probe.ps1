@@ -28,5 +28,8 @@ if (-not (Test-Path -LiteralPath $Compiler)) {
 }
 # A target keeps its observed DLL mapped until process exit. Publish a fresh
 # filename so rebuilding does not require closing the user's applications.
-@{ dll = $dllName } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output "latest.json") -Encoding utf8
+@{
+    dll = $dllName
+    source_sha256 = (Get-FileHash -LiteralPath (Join-Path $root "native\tsf_probe.cpp") -Algorithm SHA256).Hash.ToLowerInvariant()
+} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output "latest.json") -Encoding utf8
 Write-Output (Join-Path $output $dllName)

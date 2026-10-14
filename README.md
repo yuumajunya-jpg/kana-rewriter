@@ -10,6 +10,8 @@ C++編集ワーカーは比較用の実験実装として残しています。Py
 
 ## セットアップ
 
+ビルド環境のないWindows PCには、アプリとビルド済みTSF監視DLLを同梱したZIPを配布できます。展開後に`start.cmd`で起動する構成です。[配布版の作成・利用手順](docs/WINDOWS_DISTRIBUTION.md)を参照してください。以下はソースからセットアップする場合の手順です。
+
 Windows 10/11、Python 3.11以上が必要です。以下はリポジトリのルートで実行するcmd用の手順です。
 
 ```cmd
@@ -96,7 +98,7 @@ auto_replace_on_ime_commit = true
 
 設定が有効でも、`--no-auto-replace-on-ime-commit`でその起動だけ無効にできます。モデル読込後に表示される「IME確定後の自動変換: 有効」が起動時の状態です。
 
-64ビットWindows/PythonとTSF監視DLLが必要です。初回はPowerShellで次を実行します。このワークスペースのllvm-mingw、またはVisual StudioのC++開発環境とCMakeを使います。自動変換を無効にしている場合、DLLは不要です。
+64ビットWindows/PythonとTSF監視DLLが必要です。配布ZIPではDLLを同梱し、利用先のPython環境を使います。ソースから使う場合、初回はPowerShellで次を実行します。このワークスペースのllvm-mingw、またはVisual StudioのC++開発環境とCMakeを使います。自動変換を無効にしている場合、DLLは不要です。
 
 ```powershell
 .\scripts\build_tsf_probe.ps1
