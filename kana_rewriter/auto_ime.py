@@ -9,6 +9,20 @@ from .tsf import NativeProbe, KINDS, eligible, INPUT_EVENTS, COMMIT_MAX_AGE_MS
 
 logger = logging.getLogger(__name__)
 
+FOCUS_RETRY_MS = 300
+MODIFIER_KEYS = frozenset((0x10, 0x11, 0x12, 0x5B, 0x5C, *range(0xA0, 0xA6)))
+
+
+def invalidates_commit(event):
+    # OnEndEdit also fires for selection/property updates with no composition.
+    # The editor backend still verifies the complete text and selection before
+    # replacing. Keep cancellation for real keys and new IME compositions.
+    if event["kind"] == 3:
+        return event["active"] != 0
+    if event["kind"] == 8:
+        return event["key"] not in MODIFIER_KEYS
+    return event["kind"] in INPUT_EVENTS
+
 
 def tick_count():
     import ctypes as C
@@ -36,6 +50,8 @@ class CommitState:
     """Bounded mailbox plus an edit/focus revision for in-flight inference."""
     def __init__(self):
         self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)
+        self.focus_failed_since = None
         self.focus = None
         self.revision = 0
         self.pending = None
@@ -47,21 +63,46 @@ class CommitState:
 
     def track(self, focus, now=0):
         with self.lock:
+            recovered = self.focus_failed_since is not None
+            if (recovered and self.focus is not None
+                    and now - self.focus_failed_since >= FOCUS_RETRY_MS):
+                self.revision += 1
+                self.pending = None
+                self.accept_since = now
+            self.focus_failed_since = None
             if focus != self.focus:
                 self.focus = focus
                 self.revision += 1
                 self.pending = None
                 self.accept_since = now
+            self.changed.notify_all()
+            return recovered
+
+    def focus_failed(self, now):
+        """Suspend delivery on UIA errors; retain the subscription for a retry."""
+        with self.lock:
+            if self.focus_failed_since is None:
+                self.focus_failed_since = now
+            if now - self.focus_failed_since >= FOCUS_RETRY_MS:
+                if self.focus is not None:
+                    self.focus = None
+                    self.revision += 1
+                self.pending = None
+                self.accept_since = now
+            self.changed.notify_all()
+            return self.focus
 
     def observe(self, events, now):
         with self.lock:
             for event in events:
-                if event["kind"] in INPUT_EVENTS:
+                if (self.focus is None or event["tid"] != self.focus.tid
+                        or event["pid"] != self.focus.target[2]):
+                    continue
+                if invalidates_commit(event):
                     self.revision += 1
                     self.pending = None
-                if self.closed or self.busy or self.focus is None:
-                    continue
-                if event["tid"] != self.focus.tid:
+                    self.changed.notify_all()
+                if self.closed or self.busy:
                     continue
                 valid, _ = eligible(event, now, self.focus.target)
                 if valid and self.accept_since <= event["composition_tick"] <= event["tick"]:
@@ -70,28 +111,38 @@ class CommitState:
 
     def take(self, now):
         with self.lock:
+            if self.focus_failed_since is not None:
+                return None
             commit, self.pending = self.pending, None
             if (not self.closed and not self.busy and commit is not None
                     and 0 <= now - commit.tick <= COMMIT_MAX_AGE_MS):
                 return commit
         return None
 
-    def valid(self, commit):
+    def valid(self, commit, focus_wait=0):
         with self.lock:
+            # Do not authorize edits using stale focus. A transient UIA failure
+            # may recover without permanently discarding the inference result.
+            self.changed.wait_for(
+                lambda: self.focus_failed_since is None or self.closed
+                or self.focus != commit.focus or self.revision != commit.revision,
+                timeout=focus_wait)
             return (not self.closed and self.focus == commit.focus
-                    and self.revision == commit.revision)
+                    and self.revision == commit.revision and self.focus_failed_since is None)
 
     def begin(self, commit=None):
         with self.lock:
             if self.closed:
                 return False
             if commit is not None:
-                if self.busy or self.focus != commit.focus or self.revision != commit.revision:
+                if (self.busy or self.focus_failed_since is not None
+                        or self.focus != commit.focus or self.revision != commit.revision):
                     return False
             else:
                 self.revision += 1
             self.pending = None
             self.busy = True
+            self.changed.notify_all()
             return True
 
     def finish(self, now):
@@ -100,12 +151,14 @@ class CommitState:
             self.pending = None
             self.busy = False
             self.accept_since = max(self.accept_since, now)
+            self.changed.notify_all()
 
     def close(self):
         with self.lock:
             self.closed = True
             self.pending = None
             self.revision += 1
+            self.changed.notify_all()
 
 
 class FocusReader:
@@ -217,7 +270,7 @@ class AutoImeMonitor:
         return self.state.take(tick_count())
 
     def valid(self, commit):
-        return self.thread.is_alive() and self.state.valid(commit)
+        return self.thread.is_alive() and self.state.valid(commit, FOCUS_RETRY_MS / 1000 + 0.05)
 
     def begin(self, commit=None):
         return self.state.begin(commit)
@@ -248,9 +301,11 @@ class AutoImeMonitor:
                 try:
                     current = self.reader.read()
                 except Exception:
-                    current = None
+                    current = self.state.focus_failed(self.reader.now())
                     logger.debug("TSF自動変換: フォーカス取得不可", exc_info=True)
-                self.state.track(current, self.reader.now())
+                else:
+                    if self.state.track(current, self.reader.now()):
+                        self.wake()
                 if current != field:
                     if probe is not None and (current is None or field is None or current.tid != field.tid):
                         clean = probe.close()

@@ -2,11 +2,12 @@ import ctypes
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
 
-from kana_rewriter.auto_ime import CommitState, Focus, AutoImeMonitor, tick_count
+from kana_rewriter.auto_ime import CommitState, Focus, AutoImeMonitor, tick_count, FOCUS_RETRY_MS
 from kana_rewriter.core import Config
 from kana_rewriter.tsf import probe_path
 
@@ -92,9 +93,106 @@ class StateTests(unittest.TestCase):
             state.observe(commit_events(), 100)
             commit = state.take(100)
             self.assertTrue(state.begin(commit))
-            state.observe([event(kind)], 110)
+            state.observe([event(kind, active=1 if kind == 3 else 0)], 110)
             self.assertFalse(state.valid(commit))
             self.assertIsNone(state.take(110))
+
+    def test_idle_notifications_and_modifier_keys_preserve_pending_and_inference(self):
+        for notice in ([event(3, active=0)], [event(8, key=0x10)],
+                       [event(8, key=0xA1)], [event(8, key=0x11)],
+                       [event(8, key=0x12)], [event(8, key=0x5B)]):
+            with self.subTest(notice=notice):
+                state = CommitState()
+                state.track(FIELD)
+                state.observe(commit_events(), 100)
+                state.observe(notice, 110)
+                commit = state.take(110)
+                self.assertIsNotNone(commit)
+                self.assertTrue(state.begin(commit))
+                state.observe(notice, 120)
+                self.assertTrue(state.valid(commit))
+
+    def test_modifier_shortcut_and_new_composition_still_cancel(self):
+        for notices in ([event(8, key=0x11), event(8, key=ord('V'))],
+                        [event(3, active=1), event(3, active=0)],
+                        [event(8, key=0x0D)], [event(8, key=0x25)]):
+            with self.subTest(notices=notices):
+                state = CommitState()
+                state.track(FIELD)
+                state.observe(commit_events(), 100)
+                commit = state.take(100)
+                self.assertTrue(state.begin(commit))
+                state.observe(notices, 110)
+                self.assertFalse(state.valid(commit))
+
+    def test_notices_from_other_process_or_thread_do_not_cancel(self):
+        self.state.observe(commit_events(), 100)
+        commit = self.state.take(100)
+        self.assertTrue(self.state.begin(commit))
+        self.state.observe([event(3, active=1, tid=99), event(8, pid=99)], 110)
+        self.assertTrue(self.state.valid(commit))
+
+    def test_focus_error_suspends_delivery_then_same_field_recovers(self):
+        self.state.observe(commit_events(), 100)
+        self.assertEqual(self.state.focus_failed(110), FIELD)
+        self.assertIsNone(self.state.take(120))
+        self.state.track(FIELD, 140)
+        commit = self.state.take(140)
+        self.assertTrue(self.state.begin(commit))
+        self.state.focus_failed(150)
+        self.assertFalse(self.state.valid(commit))
+        self.state.track(FIELD, 180)
+        self.assertTrue(self.state.valid(commit))
+
+    def test_valid_waits_for_focus_recovery_before_authorizing_edit(self):
+        self.state.observe(commit_events(), 100)
+        commit = self.state.take(100)
+        self.assertTrue(self.state.begin(commit))
+        self.state.focus_failed(110)
+        entered, done = threading.Event(), threading.Event()
+        results = []
+        def validate():
+            entered.set()
+            results.append(self.state.valid(commit, focus_wait=2))
+            done.set()
+        worker = threading.Thread(target=validate)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(done.wait(.02))
+            self.state.track(FIELD, 140)
+            self.assertTrue(done.wait(1))
+            self.assertEqual(results, [True])
+        finally:
+            self.state.close()
+            worker.join(2)
+
+    def test_persistent_focus_failure_or_confirmed_switch_cannot_recover_result(self):
+        for recovery in (None, Focus(FIELD.target, (99,), FIELD.tid), 'timeout', 'late'):
+            with self.subTest(recovery=recovery):
+                state = CommitState()
+                state.track(FIELD)
+                state.observe(commit_events(), 100)
+                commit = state.take(100)
+                self.assertTrue(state.begin(commit))
+                state.focus_failed(110)
+                if recovery == 'timeout':
+                    self.assertIsNone(state.focus_failed(110 + FOCUS_RETRY_MS))
+                elif recovery == 'late':
+                    state.track(FIELD, 110 + FOCUS_RETRY_MS)
+                else:
+                    state.track(recovery, 140)
+                state.track(FIELD, 500)
+                self.assertFalse(state.valid(commit))
+
+    def test_new_ime_input_during_focus_retry_still_invalidates_result(self):
+        self.state.observe(commit_events(), 100)
+        commit = self.state.take(100)
+        self.assertTrue(self.state.begin(commit))
+        self.state.focus_failed(110)
+        self.state.observe([event(3, active=1)], 120)
+        self.state.track(FIELD, 140)
+        self.assertFalse(self.state.valid(commit))
 
     def test_manual_action_discards_pending_auto_and_notifications_while_busy(self):
         self.state.observe(commit_events(), 100)
@@ -148,6 +246,42 @@ class StateTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")
 class WatcherTests(unittest.TestCase):
+    def test_transient_focus_exception_keeps_subscription_and_wakes_on_recovery(self):
+        reader, probe, wake = Mock(), Mock(), Mock()
+        probe.start.return_value = probe
+        probe.close.return_value = True
+        probe.dropped.return_value = 0
+        monitor = AutoImeMonitor(Config(auto_replace_on_ime_commit=True), wake,
+                                 reader_factory=lambda: reader, probe_factory=lambda *args: probe)
+        now, reads = 100, 0
+        observations = []
+        reader.now.side_effect = lambda: now
+
+        def read():
+            nonlocal now, reads
+            reads += 1
+            now += 30
+            if reads == 2:
+                raise RuntimeError('temporary UIA error')
+            if reads == 3:
+                observations.append((monitor.state.focus, monitor.state.focus_failed_since))
+            if reads == 4:
+                observations.append((monitor.state.focus, monitor.state.focus_failed_since))
+                monitor.stopping.set()
+            return FIELD
+
+        reader.read.side_effect = read
+        probe.drain.side_effect = [[event(1)], [], [], []]
+        # Run the observer loop deterministically without OS hooks or COM calls.
+        with patch.dict(sys.modules, {'comtypes': Mock()}), \
+                patch.object(monitor.stopping, 'wait', return_value=False):
+            monitor._run()
+        self.assertIsNone(monitor.error)
+        self.assertEqual(observations, [(FIELD, 160), (FIELD, None)])
+        probe.start.assert_called_once()
+        probe.close.assert_called_once()  # shutdown only, no detach on the error
+        self.assertEqual(wake.call_count, 2)  # attached notification and recovery
+
     @unittest.skipUnless(probe_path().is_file(), "Build TSF DLL first")
     def test_real_observer_can_follow_two_processes_and_detach(self):
         from tests.test_tsf_probe import Fixture
