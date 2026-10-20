@@ -11,11 +11,12 @@ KINDS = {1: "attached", 2: "context", 3: "editing", 4: "commit_candidate",
          5: "canceled_or_empty", 6: "error", 7: "detached", 8: "key", 9: "unsupported"}
 INPUT_EVENTS = frozenset((2, 3, 4, 5, 6, 7, 8, 9))
 COMMIT_MAX_AGE_MS = 1500
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
+MODIFIER_CTRL = 1
 
 
 class Packet(C.Structure):
-    _fields_ = [(name, C.c_uint32) for name in ("kind", "pid", "tid", "hr", "key", "active")] + [
+    _fields_ = [(name, C.c_uint32) for name in ("kind", "pid", "tid", "hr", "key", "active", "modifiers")] + [
         (name, C.c_uint64) for name in ("tick", "hwnd", "generation", "composition_tick")] + [("text", C.c_wchar * 1024)]
 
 
@@ -76,11 +77,16 @@ class NativeProbe:
 
 
 def eligible(event, now, target):
-    """Application policy: Enter commits containing kana in the current target."""
+    """Application policy: plain Enter commits containing kana; Ctrl+Enter is
+    a user-requested commit without replacement."""
     if event["kind"] != 4:
         return False, "not_candidate"
     if event["key"] != 0x0D:
         return False, "enter_not_observed"
+    # Ctrl+Enter is an IME commit too, but the user uses it to keep the
+    # committed reading unchanged.
+    if event["modifiers"] & MODIFIER_CTRL:
+        return False, "ctrl_confirm"
     if event["pid"] != target[2] or event["hwnd"] != target[1]:
         return False, "focus_changed"
     if not 0 <= now - event["tick"] <= COMMIT_MAX_AGE_MS:

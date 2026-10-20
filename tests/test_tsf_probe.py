@@ -40,8 +40,10 @@ class TrialGateTests(unittest.TestCase):
         close_monitor.assert_called_once()
         close_timer.assert_called_once()
     def test_only_fresh_enter_commit_in_the_same_field_is_eligible(self):
-        event = dict(kind=4, key=13, pid=3, hwnd=2, tick=100, text="さんぽ")
+        event = dict(kind=4, key=13, pid=3, hwnd=2, tick=100, text="さんぽ", modifiers=0)
         self.assertEqual(eligible(event, 120, (1, 2, 3)), (True, "eligible"))
+        self.assertEqual(eligible({**event, "modifiers": 1}, 120, (1, 2, 3)),
+                         (False, "ctrl_confirm"))
         for updates, now, target in ((dict(key=0), 120, (1, 2, 3)),
                                      (dict(key=27), 120, (1, 2, 3)),
                                      ({}, 1700, (1, 2, 3)),

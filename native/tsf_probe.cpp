@@ -14,10 +14,11 @@
 using Microsoft::WRL::ComPtr;
 constexpr unsigned capacity = 64, text_limit = 1024;
 struct Packet {
-    DWORD kind, pid, tid, hr, key, active;
+    DWORD kind, pid, tid, hr, key, active, modifiers;
     ULONGLONG tick, hwnd, generation, composition_tick;
     wchar_t text[text_limit];
 };
+constexpr DWORD ModifierCtrl=1, ModifierAlt=2, ModifierShift=4, ModifierWin=8;
 struct Shared {
     volatile LONG write, read, dropped, stop, attached;
     ULONGLONG control_hwnd;
@@ -59,7 +60,7 @@ public:
     DWORD manager_cookie=TF_INVALID_COOKIE, text_cookie=TF_INVALID_COOKIE, key_cookie=TF_INVALID_COOKIE;
     ULONGLONG generation=0;
     unsigned busy=0;
-    DWORD last_key=0;
+    DWORD last_key=0, last_modifiers=0;
     ULONGLONG key_tick=0;
     bool canceled=false;
     bool failed=false;
@@ -90,7 +91,9 @@ public:
         packet.kind=kind; packet.hr=static_cast<DWORD>(hr); packet.pid=GetCurrentProcessId();
         packet.tid=GetCurrentThreadId(); packet.tick=GetTickCount64();
         packet.hwnd=reinterpret_cast<ULONGLONG>(GetFocus()); packet.generation=generation;
-        packet.key=(kind==Candidate && GetTickCount64()-key_tick>1500)?0:last_key;
+        bool fresh_key=GetTickCount64()-key_tick<=1500;
+        packet.key=(kind==Candidate && !fresh_key)?0:last_key;
+        packet.modifiers=(kind==Key || (kind==Candidate && fresh_key))?last_modifiers:0;
         packet.active=active;
         packet.composition_tick=composition_tick;
         if (text.size()>=text_limit) { packet.kind=Unsupported; packet.hr=ERROR_BUFFER_OVERFLOW; }
@@ -100,7 +103,7 @@ public:
     }
     bool stopping() const { return failed || !shared || shared->stop || !owner || WaitForSingleObject(owner,0)!=WAIT_TIMEOUT; }
     HRESULT clear_context() {
-        previous.clear(); canceled=false; last_key=0; key_tick=0; ++generation;
+        previous.clear(); canceled=false; last_key=0; last_modifiers=0; key_tick=0; ++generation;
         HRESULT hr=S_OK;
         if (context_source && text_cookie!=TF_INVALID_COOKIE) hr=context_source->UnadviseSink(text_cookie);
         text_cookie=TF_INVALID_COOKIE; context_source.Reset(); context.Reset();
@@ -170,9 +173,18 @@ public:
     HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr* doc,ITfDocumentMgr*) override { return change_focus(doc,false); }
     HRESULT STDMETHODCALLTYPE OnPushContext(ITfContext*) override { return change_focus(nullptr,true); }
     HRESULT STDMETHODCALLTYPE OnPopContext(ITfContext*) override { return change_focus(nullptr,true); }
+    DWORD modifier_state() const {
+        DWORD value=0;
+        if (GetKeyState(VK_CONTROL)&0x8000) value|=ModifierCtrl;
+        if (GetKeyState(VK_MENU)&0x8000) value|=ModifierAlt;
+        if (GetKeyState(VK_SHIFT)&0x8000) value|=ModifierShift;
+        if ((GetKeyState(VK_LWIN)|GetKeyState(VK_RWIN))&0x8000) value|=ModifierWin;
+        return value;
+    }
     HRESULT STDMETHODCALLTYPE OnKeyTraceDown(WPARAM key,LPARAM) override {
         if (stopping()) return S_OK;
         last_key=static_cast<DWORD>(key);
+        last_modifiers=modifier_state();
         key_tick=GetTickCount64();
         if (key==VK_ESCAPE && !previous.empty()) canceled=true;
         emit(Key); return S_OK;
@@ -204,7 +216,7 @@ public:
             current.push_back(std::move(entry)); view.Reset();
         }
         if (hr!=S_FALSE) { emit(Error,hr); previous.clear(); return; }
-        if (previous.empty() && !current.empty()) { canceled=false; last_key=0; key_tick=0; }
+        if (previous.empty() && !current.empty()) { canceled=false; last_key=0; last_modifiers=0; key_tick=0; }
         emit(Editing,S_OK,L"",static_cast<DWORD>(current.size()));
         for (auto& old:previous) {
             bool exists=std::any_of(current.begin(),current.end(),[&](const Range& now){return now.identity.Get()==old.identity.Get();});
@@ -270,7 +282,7 @@ LRESULT CALLBACK ProbeHook(int code,WPARAM wparam,LPARAM lparam) {
 }
 
 // Check the packet layout before Python passes a buffer to PollProbe.
-extern "C" __declspec(dllexport) DWORD WINAPI ProbeProtocolVersion() { return 2; }
+extern "C" __declspec(dllexport) DWORD WINAPI ProbeProtocolVersion() { return 3; }
 extern "C" __declspec(dllexport) BOOL WINAPI StartProbe(DWORD tid) {
     if (!tid || host_poisoned) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     if (host_mapping) { SetLastError(ERROR_ALREADY_EXISTS); return FALSE; }

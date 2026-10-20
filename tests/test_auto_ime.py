@@ -17,7 +17,8 @@ FIELD = Focus((1, 2, 3), (10,), 4)
 
 def event(kind, **values):
     return {**dict(kind=kind, pid=3, tid=4, hwnd=2, tick=100, key=13,
-                   active=0, hr=0, generation=1, composition_tick=90, text="さんぽ"), **values}
+                   active=0, modifiers=0, hr=0, generation=1,
+                   composition_tick=90, text="さんぽ"), **values}
 
 
 def commit_events():
@@ -69,6 +70,10 @@ class StateTests(unittest.TestCase):
         commit = self.state.take(500)
         self.assertEqual(commit.text, "さんぽ")
         self.assertEqual(commit.focus, FIELD)
+        self.assertIsNone(self.state.take(500))
+
+    def test_ctrl_enter_commit_is_delivered_without_replacement(self):
+        self.state.observe(commit_events()[:-1] + [event(4, modifiers=1)], 100)
         self.assertIsNone(self.state.take(500))
 
     def test_cancellation_and_notice_from_previous_field_do_not_trigger(self):

@@ -104,10 +104,12 @@ class CommitState:
                     self.changed.notify_all()
                 if self.closed or self.busy:
                     continue
-                valid, _ = eligible(event, now, self.focus.target)
+                valid, reason = eligible(event, now, self.focus.target)
                 if valid and self.accept_since <= event["composition_tick"] <= event["tick"]:
                     text = event["text"].replace("\r\n", "\n").replace("\r", "\n")
                     self.pending = Commit(text, self.focus, event["tick"], self.revision)
+                elif event["kind"] == 4 and reason == "ctrl_confirm":
+                    logger.debug("TSF自動変換: Ctrl+Enterのため置換しません")
 
     def take(self, now):
         with self.lock:
@@ -332,9 +334,9 @@ class AutoImeMonitor:
                     attached |= any(event["kind"] == 1 for event in events)
                     for event in events:
                         if event["kind"] in (1, 2, 4, 5, 6, 9):
-                            logger.debug("TSF自動変換: %s pid=%s tid=%s key=%s hr=0x%08x chars=%s",
+                            logger.debug("TSF自動変換: %s pid=%s tid=%s key=%s mods=%s hr=0x%08x chars=%s",
                                          KINDS.get(event["kind"]), event["pid"], event["tid"], event["key"],
-                                         event["hr"], len(event["text"]))
+                                         event["modifiers"], event["hr"], len(event["text"]))
                     if probe.dropped():
                         raise RuntimeError("TSF通知が欠落したため自動変換を停止しました")
                     self.state.observe(events, now)
