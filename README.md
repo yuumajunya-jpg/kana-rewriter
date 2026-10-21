@@ -88,29 +88,39 @@ xsmallとsmallで入力形式は同じです。これまでの速度計測はxsm
 
 ```toml
 auto_replace_on_ime_commit = true
+ime_commit_backend = "tsf"
 ```
 
 起動時だけ有効にする場合:
 
 ```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --auto-replace-on-ime-commit
+.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --auto-replace-on-ime-commit --ime-commit-backend tsf
 ```
 
 設定が有効でも、`--no-auto-replace-on-ime-commit`でその起動だけ無効にできます。モデル読込後に表示される「IME確定後の自動変換: 有効」が起動時の状態です。
 
-64ビットWindows/PythonとTSF監視DLLが必要です。配布ZIPではDLLを同梱し、利用先のPython環境を使います。ソースから使う場合、初回はPowerShellで次を実行します。このワークスペースのllvm-mingw、またはVisual StudioのC++開発環境とCMakeを使います。自動変換を無効にしている場合、DLLは不要です。
+64ビットWindows/PythonとTSF編集DLLが必要です。配布ZIPではDLLを同梱し、利用先のPython環境を使います。ソースから使う場合、初回はPowerShellで次を実行します。このワークスペースのllvm-mingw、またはVisual StudioのC++開発環境とCMakeを使います。自動変換を無効にしている場合、DLLは不要です。
 
 ```powershell
-.\scripts\build_tsf_probe.ps1
+.\scripts\build_tsf_edit_probe.ps1
 ```
+
+`ime_commit_backend = "tsf"`では、確定時のTSF範囲に直接置換します。UIAは本文・文脈の読み取りに使い、選択・文字送信には使いません。
+手動ショートカットは従来のWin32/UIA経路です。自動変換の失敗後にUIAへ切り替えたり、文字を再送したりしません。
+書き込み結果が不明になった場合は停止し、本文確認と再起動を求めます。
+
+既存設定で`ime_commit_backend`を省略した場合は互換性のため`"uia"`です。
+従来の自動変換を選ぶ場合は`ime_commit_backend = "uia"`とし、`build_tsf_probe.ps1`で監視DLLをビルドします。
+起動時だけの指定は`--ime-commit-backend tsf`または`--ime-commit-backend uia`です。
+TSF編集DLLを固定する場合は`tsf_edit_path`、UIA方式の監視DLLは従来の`tsf_monitor_path`で指定します。
 
 自動変換は`editor_worker = "python"`の直接編集方式（`edit_backend = "auto"` / `"uia"` / `"win32"`）に対応します。入力先の切り替えに追従し、TSFで観測できない入力欄では手動ショートカットを使用します。パスワード・読み取り専用欄は対象外です。
 
-TSFの未確定範囲が終了し、Enter操作を観測して、確定文字列と実際の本文・カーソルの一致を確認した場合に変換します。未確定のまま入力を止めても変換しません。推論中に入力・フォーカスが変わった場合は中止し、変換中の通知を後から再実行しません。部分確定・マウス確定は自動変換の対象として保証していません。
+TSFの未確定範囲が終了し、Enter操作を観測して、確定文字列と実際の本文・カーソルの一致を確認した場合に変換します。IME確定のEnterでは、キーが離れるのを待たずに置換処理へ進みますが、本文・フォーカス・IME状態の確認はそのまま行います。未確定のまま入力を止めても変換しません。推論中に入力・フォーカスが変わった場合は中止し、変換中の通知を後から再実行しません。部分確定・マウス確定は自動変換の対象として保証していません。
 
 自動変換が有効なときでも、変換中に`Ctrl+Enter`で確定した場合は置換せず、読みのまま確定します（Microsoft IMEの`Ctrl+Enter`は全確定）。この抑制を使う場合、手動変換のショートカットに`Ctrl+Enter`を割り当てないでください。`半角全角`などを併用すると区別できます。
 
-Chrome/Webメモでは、通常起動でのモデル変換、別の入力欄・アプリへの移動後の追従、未確定の停止・取消の動作を利用者環境で確認しています。他アプリ・IMEの互換性は個別に確認してください。`--debug`で監視の登録・確定候補・中止理由を表示します。通常モードへの組み込みと制限は[TSF検証資料](docs/TSF_PROBE.md)を参照してください。
+TSF直接編集は、Obsidianの同じ箇条書き行での繰り返し置換を、固定結果とAI推論の両方で利用者環境にて確認しています。他アプリ・IMEの互換性は個別に確認してください。`--debug`で監視の登録・確定候補・中止理由を表示します。検証範囲と統合内容は[TSF直接編集資料](docs/TSF_DIRECT_EDIT_TRIAL.md)を参照してください。以前のUIA方式でのChrome/Webメモの確認記録は[TSF監視検証資料](docs/TSF_PROBE.md)にあります。
 
 `--config`を省略すると`config.toml`は読み込まず、プログラム内の既定値を使います。その場合の変換キーはCtrl+Alt+K / Ctrl+Alt+Jです。キーは設定で変更できます。他アプリと競合すると起動を中止します。
 
@@ -134,12 +144,17 @@ CPU推論が既定です。GPU対応ランタイムでは`n_gpu_layers = -1`で�
 - 標準Edit/RichEditは非表示入力欄で部分置換・改行・絵文字・カーソル復元・Undoを検証しています。
 - UIAはTextPatternによる本文と位置の取得が必要です。Webメモでの手動試行では置換成功を確認しています。他のアプリの互換性は個別に確認してください。
 - 読み取り専用・パスワード欄は対象外です。管理者権限のアプリや端末では利用できない場合があります。
-- UIA入力ではIMEを一時オフにし、本文・位置の反映確認後に元の状態へ戻します。状態が変わるか確認に失敗した場合は中止し、文字を再送しません。
+- UIA入力では対象範囲の選択前にIMEを一時オフにし、選択から送信までの間はIME制御メッセージを送らず、本文・位置の反映確認後に元の状態へ戻します。状態が変わるか確認に失敗した場合は中止し、文字を再送しません。
 - 候補選択、読みの辞書検証、トレイUI、自動起動は未実装です。変換結果の誤りは起こりえます。
 
 変換範囲・IME・中止条件・VS Code/Monacoの設定は[編集処理の詳細](docs/EDITOR_DETAILS.md)を参照してください。
 
 ## 診断・速度比較
+
+実操作での不具合を記録するには、普段の起動コマンドに `--diagnostic-log logs\obsidian-repro.log` を追加します。
+端末出力と詳細診断をUTF-8で追記保存します。ログには入力本文・変換対象も含まれます。
+ファイルへの書き込みは別スレッドで行い、選択失敗時にUIA範囲の追加情報を記録します。
+パスを省略して `--diagnostic-log` だけを指定すると、`logs/` 内に日時付きファイルを作ります。
 
 入力欄の能力を確認するには、次を実行して3秒以内に対象へフォーカスを移します。モデルを読み込まず、文字を変更しません。
 
@@ -163,6 +178,6 @@ AIなしでPython版とC++版を比較する手順と実測値は[PYTHON_EDITOR_
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-最終確認ではWindowsで237テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。半角全角のRaw Inputは登録・解除と疑似通知を試験しており、実機でのキー操作は別途確認が必要です。TSFの自動変換には合成編集セッション、別プロセス2つへの監視切り替え、標準Editの実置換、通常起動・設定・中止条件の試験を含みます。
+最終確認ではWindowsで246テスト成功。未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。半角全角のRaw Inputは登録・解除と疑似通知を試験しており、実機でのキー操作は別途確認が必要です。TSFの自動変換には合成編集セッション、別プロセス2つへの監視切り替え、標準Editの実置換、通常起動・設定・中止条件の試験を含みます。
 
 資料一覧は[docs/README.md](docs/README.md)、初回GitHub公開の手順は[docs/GITHUB_PUBLISH.md](docs/GITHUB_PUBLISH.md)を参照してください。

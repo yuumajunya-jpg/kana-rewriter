@@ -1,4 +1,5 @@
 import ctypes as C
+from contextlib import contextmanager
 import multiprocessing
 import sys
 import time
@@ -41,6 +42,41 @@ class SnapshotTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class EngineTests(unittest.TestCase):
+    def test_commit_capture_uses_uia_selection_then_unicode_send_and_readback(self):
+        from kana_rewriter.direct import EditorEngine
+        editor, model = UiaRangeTests().prepare()
+        model.text = "- さんぽ"
+        model.boundaries = list(range(len(model.text) + 1))
+        model.selected = Range(model, 5, 5)
+        editor.pattern.DocumentRange = Range(model)
+        editor.chromium = True
+        editor.range_for = Mock(wraps=editor.range_for)
+        engine = EditorEngine(Config())
+        batches = []
+
+        def deliver(events):
+            batches.append(events)
+            self.assertEqual((model.selected.start, model.selected.end), (2, 5))
+            self.assertTrue(all(e.vk == 0 for e in events))
+            r = model.selected
+            inserted = "".join(chr(e.scan) for e in events if e.flags == 4)
+            model.text = model.text[:r.start] + inserted + model.text[r.end:]
+            model.selected = Range(model, r.start + len(inserted), r.start + len(inserted))
+
+        with patch.object(engine, "editor", return_value=editor), \
+                patch("kana_rewriter.direct_win32.window_identity", return_value=(1, 2, 3)), \
+                patch("kana_rewriter.direct_win32.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_win32.wait_input_release"), \
+                patch("kana_rewriter.direct_win32.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send", side_effect=deliver):
+            capture = engine.capture("commit", 1000, committed_text="さんぽ")
+            self.assertTrue(engine.apply(capture, "散歩"))
+        self.assertEqual(model.text, "- 散歩")
+        self.assertEqual(len(batches), 1)
+        editor.range_for.assert_called_once()
+
     def test_foreign_thread_ime_context_is_not_used_to_block_conversion(self):
         from kana_rewriter import direct_win32 as win
         with patch.object(win.user, "GetAsyncKeyState", return_value=0), \
@@ -315,6 +351,175 @@ class Range:
         return a - b
 
 
+class TrackingRange(Range):
+    """Range that records the target selection for IME interaction tests."""
+
+    def Clone(self):
+        return TrackingRange(self.model, self.start, self.end)
+
+    def Select(self):
+        self.model.events.append("select")
+        session = getattr(self.model, "ime", None)
+        if session is not None and session.pending:
+            # The toggle notification is still queued on the target thread;
+            # selecting now lets the editor reset the range.
+            session.pending = False
+            self.model.selected = Range(self.model, 0, 0)
+            self.model.selection_active = False
+            self.model.events.append("selection_collapsed")
+            return
+        self.model.selection_active = True
+        super().Select()
+
+
+class UnselectableRange(TrackingRange):
+    """A GetSelection-derived range: text reads, but Select() is a no-op.
+
+    Chromium's UIA provider can retain the selection's accessibility anchors.
+    Such a range can read the right text while Select() returns success without
+    applying it (for example, when an endpoint is in a list marker).
+    """
+
+    def Clone(self):
+        return UnselectableRange(self.model, self.start, self.end)
+
+    def Select(self):
+        self.model.events.append("select_rejected")
+
+
+class AnchorRange(Range):
+    """Range whose Select() depends on how its start endpoint was anchored.
+
+    Chromium can expose a text range that reads the requested text while its
+    start anchor belongs to the preceding block (for example, a list item).
+    Select() then leaves the live selection unchanged. A range built backwards
+    from the verified right endpoint keeps a selectable anchor.
+
+    Repeated replacements add list items to the same editor. Once the configured
+    number of list markers is present before the target, a prefix-built start
+    anchor is rejected, while a right-anchored range remains selectable.
+    """
+
+    def __init__(self, model, start=0, end=None, start_anchor=None, end_anchor=None):
+        super().__init__(model, start, end)
+        self.start_anchor = start_anchor if start_anchor is not None else self._anchor(self.start)
+        self.end_anchor = end_anchor if end_anchor is not None else self._anchor(self.end)
+
+    def _anchor(self, position):
+        if position >= len(self.model.text):
+            return "document"
+        threshold = getattr(self.model, "anchor_after_list_items", 0)
+        if threshold and self.model.text[:position].count("\n- ") >= threshold:
+            return "unselectable"
+        return "document"
+
+    def Clone(self):
+        return AnchorRange(self.model, self.start, self.end,
+                           self.start_anchor, self.end_anchor)
+
+    def MoveEndpointByRange(self, endpoint, other, other_endpoint):
+        super().MoveEndpointByRange(endpoint, other, other_endpoint)
+        anchor = getattr(other, "start_anchor" if other_endpoint == 0 else "end_anchor",
+                         "document")
+        if endpoint == 0:
+            self.start_anchor = anchor
+        else:
+            self.end_anchor = anchor
+
+    def MoveEndpointByUnit(self, endpoint, unit, count):
+        boundaries = self.model.boundaries
+        value = self.start if endpoint == 0 else self.end
+        old = boundaries.index(value)
+        new = max(0, min(len(boundaries) - 1, old + count))
+        position = boundaries[new]
+        if endpoint == 0:
+            self.start = position
+        else:
+            self.end = position
+            self.end_anchor = self._anchor(position)
+        return new - old
+
+    def Select(self):
+        if self.start_anchor == "unselectable":
+            self.model.events.append("select_rejected")
+            return
+        self.model.events.append("select")
+        super().Select()
+
+
+class FakeImeSession:
+    """Coupled IME/editor model for the two observed failure modes.
+
+    - A GETOPENSTATUS/SETOPENSTATUS message after the target range is selected
+      can make this editor collapse its selection.
+    - Unicode input sent while the IME is open becomes an unconfirmed
+      composition instead of committed document text.
+    """
+
+    def __init__(self, model, opened=True, switch_effective=True):
+        self.model = model
+        self.opened = opened
+        self.switch_effective = switch_effective
+        self.composition = ""
+        self.events = model.events
+        self.closed = False
+        self.pending = False
+        self.original = self._query()
+
+    def _query(self):
+        self.events.append("ime_query")
+        if self.model.selection_active and not self.model.sent:
+            self.model.selected = Range(self.model, 0, 0)
+            self.model.selection_active = False
+            self.events.append("selection_collapsed")
+        return self.opened
+
+    def is_open(self):
+        return self._query()
+
+    def disable(self):
+        self.events.append("ime_disable")
+        if self.original:
+            self.opened = False if self.switch_effective else True
+            if not self.opened:
+                self.pending = True
+        if self._query():
+            raise RuntimeError("IMEが有効なためUnicode入力を中止しました")
+        self.events.append("ime_off")
+        if self.original:
+            self.flush_target_thread()
+
+    def flush_target_thread(self):
+        self.events.append("ime_flush")
+        if self.pending:
+            self.pending = False
+            if self.model.selection_active and not self.model.sent:
+                self.model.selected = Range(self.model, 0, 0)
+                self.model.selection_active = False
+                self.events.append("selection_collapsed")
+
+    def close(self):
+        self.events.append("ime_close")
+        if self.closed:
+            return
+        self.closed = True
+        if self.original and not self.opened:
+            self.opened = True
+        self.events.append("ime_restored" if self.opened else "ime_left_off")
+
+
+class FakeImeFactory:
+    def __init__(self, model, opened=True, switch_effective=True):
+        self.model, self.opened = model, opened
+        self.switch_effective = switch_effective
+        self.session = None
+
+    def __call__(self, target):
+        self.session = FakeImeSession(self.model, self.opened, self.switch_effective)
+        self.model.ime = self.session
+        return self.session
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class UiaRangeTests(unittest.TestCase):
     def test_blank_line_boundary_with_different_collapsed_range_anchor(self):
@@ -361,11 +566,96 @@ class UiaRangeTests(unittest.TestCase):
                                  (len(prefix), end))
                 send.assert_called_once()
 
+    def test_repeated_list_end_replacements_keep_selecting(self):
+        editor, model = self.prepare()
+        source, result = "へんかんてすと", "変換テスト"
+        model.text = "変換テスト\n"
+        model.boundaries = list(range(len(model.text) + 1))
+        model.events = []
+        model.anchor_after_list_items = 2
+        model.selected = AnchorRange(model, len(model.text), len(model.text))
+        editor.timeout = 0
+
+        class Pattern:
+            @property
+            def DocumentRange(self):
+                return AnchorRange(model)
+
+        editor.pattern = Pattern()
+        editor.selection = lambda: model.selected
+
+        def deliver(events):
+            text = "".join(chr(event.scan) for event in events if event.flags == 4)
+            selected = model.selected
+            model.text = model.text[:selected.start] + text + model.text[selected.end:]
+            model.boundaries = list(range(len(model.text) + 1))
+            caret = selected.start + len(text)
+            model.selected = AnchorRange(model, caret, caret)
+
+        editor.limit = 200000
+        for index in range(500):
+            addition = ("\n" if index == 0 else "\n- ") + source
+            model.text += addition
+            model.boundaries = list(range(len(model.text) + 1))
+            start, end = len(model.text) - len(source), len(model.text)
+            model.selected = AnchorRange(model, end, end)
+            state = editor.read()
+            with patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                    patch("kana_rewriter.direct_uia.check_input_ready"), \
+                    patch("kana_rewriter.direct_uia.send", side_effect=deliver) as send:
+                editor.replace(state, start, end, result)
+            send.assert_called_once()
+            self.assertEqual(model.text[start:start + len(result)], result)
+            self.assertEqual((model.selected.start, model.selected.end),
+                             (start + len(result), start + len(result)))
+        self.assertNotIn("select_rejected", model.events)
+
     def test_matching_text_at_wrong_position_is_rejected(self):
         editor, model = self.prepare()
         model.text = "さんぽ\n\nさんぽ"
         document = Range(model)
         self.assertFalse(editor.range_matches(document, Range(model, 0, 3), model.text, 5, 8))
+
+    def test_chromium_suffix_selects_uia_range_before_one_unicode_batch(self):
+        source = "へんかんてすと"
+        for index in range(500):
+            with self.subTest(index=index):
+                editor, model = self.prepare()
+                model.text = ("前😀e\u0301\n- " + source + "\n") * (index % 20 + 1) + "- " + source
+                model.boundaries = [i for i in range(len(model.text) + 1)
+                                    if i == len(model.text) or model.text[i] != "\u0301"]
+                editor.pattern.DocumentRange = Range(model)
+                editor.chromium = True
+                end = len(model.text)
+                start = end - len(source)
+                model.selected = Range(model, end, end)
+                state = editor.read()
+
+                def deliver(events):
+                    self.assertEqual((model.selected.start, model.selected.end), (start, end))
+                    self.assertTrue(all(e.vk == 0 and e.flags in (4, 6) for e in events))
+
+                with patch.object(editor, "range_for", wraps=editor.range_for) as build, \
+                        patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                        patch("kana_rewriter.direct_uia.check_input_ready"), \
+                        patch("kana_rewriter.direct_uia.send", side_effect=deliver) as send:
+                    editor.replace(state, start, end, "変換テスト")
+                build.assert_called_once_with(state, start, end)
+                send.assert_called_once()
+
+    def test_failed_uia_selection_sends_no_keys_or_text(self):
+        editor, model = self.prepare()
+        editor.chromium = True
+        editor.timeout = 0
+        state = editor.read()
+        with patch.object(Range, "Select") as select, \
+                patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"), \
+                patch("kana_rewriter.direct_uia.send") as send:
+            with self.assertRaisesRegex(RuntimeError, "選択が反映されません"):
+                editor.replace(state, 5, 8, "散歩")
+        select.assert_called_once()
+        send.assert_not_called()
 
     def test_unverifiable_blank_line_range_never_selects_or_sends(self):
         editor, model = self.prepare()
@@ -543,7 +833,7 @@ class UiaRangeTests(unittest.TestCase):
 
         timing_text = "\n".join(timings.output)
         for label in ("取得/全体", "適用/キー解放待ち", "UIA/範囲構築", "UIA/選択反映待ち",
-                      "UIA/IME状態取得と一時オフ", "UIA/SendInput送信", "適用/入力反映確認",
+                      "UIA/IME一時オフと状態確認", "UIA/SendInput送信", "適用/入力反映確認",
                       "適用/カーソル復元と確認", "適用/IME復元"):
             self.assertIn(label + "=", timing_text)
 
@@ -823,3 +1113,134 @@ class UiaRangeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             editor.replace(editor.read(), 5, 8, "散歩\t")
         self.assertEqual((model.selected.start, model.selected.end), (9, 9))
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows only")
+class ImeInteractionTests(unittest.TestCase):
+    text = "前😀e\u0301。さんぽ。後"
+    replaced = "前😀e\u0301。散歩。後"
+
+    def prepare_ime(self, opened=True, switch_effective=True):
+        editor, model = UiaRangeTests.prepare(self)
+        model.events = []
+        model.selection_active = False
+        model.sent = False
+        model.selected = UnselectableRange(model, 9, 9)
+        editor.pattern = SimpleNamespace(DocumentRange=TrackingRange(model))
+        editor.selection = lambda: model.selected
+        factory = FakeImeFactory(model, opened, switch_effective)
+        editor.ime_session_factory = factory
+        real_range_for = editor.range_for
+
+        def tracked_range_for(state, start, end):
+            value = real_range_for(state, start, end)
+            model.events.append("range_built")
+            return TrackingRange(model, value.start, value.end)
+
+        editor.range_for = tracked_range_for
+        return editor, model, factory
+
+    def deliver(self, model, factory):
+        def send(events):
+            text = "".join(chr(event.scan) for event in events if event.flags == 4)
+            model.events.append("input_sent")
+            session = factory.session
+            if session.opened:
+                # The real failure: the editor keeps this as unconfirmed text.
+                session.composition += text
+                return
+            selected = model.selected
+            model.text = model.text[:selected.start] + text + model.text[selected.end:]
+            model.boundaries = list(range(len(model.text) + 1))
+            caret = selected.start + len(text)
+            model.selected = TrackingRange(model, caret, caret)
+            model.sent = True
+
+        return send
+
+    @contextmanager
+    def replace_context(self):
+        with patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
+                patch("kana_rewriter.direct_uia.check_input_ready"):
+            yield
+
+    def run_replace(self, editor, model, factory):
+        state = editor.read()
+        with self.replace_context(), \
+                patch("kana_rewriter.direct_uia.send",
+                      side_effect=self.deliver(model, factory)):
+            editor.replace(state, 5, 8, "散歩")
+
+    def assert_safe_ime_order(self, events):
+        self.assertIn("ime_off", events)
+        self.assertIn("select", events)
+        self.assertIn("input_sent", events)
+        self.assertLess(events.index("ime_off"), events.index("select"))
+        between = events[events.index("select") + 1:events.index("input_sent")]
+        self.assertFalse([event for event in between if event.startswith("ime_")], between)
+
+    def test_ime_off_precedes_selection_and_no_ime_message_follows_it(self):
+        # This is the regression test for both observed failures:
+        # - an IME message after Select() collapses the selection;
+        # - sending Unicode while the IME is open leaves an unconfirmed
+        #   composition ("テスト" remaining undetermined in the report).
+        editor, model, factory = self.prepare_ime()
+        self.run_replace(editor, model, factory)
+        editor.finish_edit()
+        self.assertEqual(model.text, self.replaced)
+        self.assertEqual(factory.session.composition, "")
+        self.assertTrue(factory.session.opened)
+        self.assertIn("ime_flush", model.events)
+        self.assertLess(model.events.index("ime_flush"), model.events.index("select"))
+        self.assert_safe_ime_order(model.events)
+
+    def test_target_range_is_built_after_ime_disable_and_target_flush(self):
+        editor, model, factory = self.prepare_ime()
+        self.run_replace(editor, model, factory)
+        editor.finish_edit()
+        self.assertLess(model.events.index("ime_flush"), model.events.index("range_built"))
+        self.assertLess(model.events.index("range_built"), model.events.index("select"))
+
+    def test_target_range_is_built_from_document_not_live_selection(self):
+        editor, model, factory = self.prepare_ime()
+        self.assertIsInstance(model.selected, UnselectableRange)
+        self.run_replace(editor, model, factory)
+        editor.finish_edit()
+        self.assertEqual(model.text, self.replaced)
+        self.assertEqual(factory.session.composition, "")
+        self.assertIn("select", model.events)
+        self.assertNotIn("select_rejected", model.events)
+
+    def test_already_off_ime_stays_off_and_is_not_queried_after_selection(self):
+        editor, model, factory = self.prepare_ime(opened=False)
+        self.run_replace(editor, model, factory)
+        editor.finish_edit()
+        self.assertEqual(factory.session.composition, "")
+        self.assertFalse(factory.session.opened)
+        self.assert_safe_ime_order(model.events)
+
+    def test_send_failure_restores_original_ime_state_without_composition(self):
+        editor, model, factory = self.prepare_ime()
+        state = editor.read()
+        send = Mock(side_effect=RuntimeError("送信失敗"))
+        with self.replace_context(), patch("kana_rewriter.direct_uia.send", send):
+            with self.assertRaisesRegex(RuntimeError, "送信失敗"):
+                editor.replace(state, 5, 8, "散歩")
+        send.assert_called_once()
+        editor.finish_edit()
+        self.assertEqual(model.text, self.text)
+        self.assertEqual(factory.session.composition, "")
+        self.assertTrue(factory.session.opened)
+
+    def test_switch_failure_sends_nothing_and_keeps_original_state(self):
+        editor, model, factory = self.prepare_ime(switch_effective=False)
+        state = editor.read()
+        send = Mock()
+        with self.replace_context(), patch("kana_rewriter.direct_uia.send", send):
+            with self.assertRaisesRegex(RuntimeError, "IMEが有効"):
+                editor.replace(state, 5, 8, "散歩")
+        send.assert_not_called()
+        editor.finish_edit()
+        self.assertEqual(model.text, self.text)
+        self.assertEqual(factory.session.composition, "")
+        self.assertTrue(factory.session.opened)

@@ -36,6 +36,8 @@ class Config:
     hotkey_quit: str = ""
     auto_replace_on_ime_commit: bool = False
     tsf_monitor_path: str = ""
+    ime_commit_backend: str = "uia"
+    tsf_edit_path: str = ""
     edit_backend: str = "auto"
     uia_ime_check: str = "auto"
     editor_timeout_seconds: float = 5
@@ -50,6 +52,10 @@ class Config:
             raise ValueError("auto_replace_on_ime_commitは真偽値です")
         if not isinstance(self.tsf_monitor_path, str):
             raise ValueError("tsf_monitor_pathはDLLのパスまたは空文字列です")
+        if not isinstance(self.ime_commit_backend, str) or self.ime_commit_backend not in {'uia', 'tsf'}:
+            raise ValueError('ime_commit_backendはuiaまたはtsfです')
+        if not isinstance(self.tsf_edit_path, str):
+            raise ValueError('tsf_edit_pathはDLLのパスまたは空文字列です')
         if self.auto_replace_on_ime_commit and (self.editor_worker != "python" or self.edit_backend == "clipboard"):
             raise ValueError("TSF自動変換はPythonの直接編集方式を使用してください")
         if self.editor_worker not in {"python", "native"}:
@@ -114,6 +120,10 @@ class Config:
             monitor_path = Path(values["tsf_monitor_path"])
             if not monitor_path.is_absolute():
                 values["tsf_monitor_path"] = str(file.parent / monitor_path)
+        if values.get('tsf_edit_path'):
+            edit_path = Path(values['tsf_edit_path'])
+            if not edit_path.is_absolute():
+                values['tsf_edit_path'] = str(file.parent / edit_path)
         return cls(**values)
 
 

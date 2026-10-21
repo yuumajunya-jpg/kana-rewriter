@@ -79,6 +79,10 @@ class EditorEngine:
             raise ValueError(f"{exc}（{editor.kind}: 取得本文{len(state.text)}文字、"
                              f"カーソル/選択{state.start}:{state.end}。--debugで取得内容を確認）") from exc
         self.saved = (capture, editor, state)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("取得識別: token=%s / mode=%s / 操作番号=%s / window=%r / 行内位置=%s",
+                         capture.edit_token, mode, tick, target,
+                         state.end - (state.text.rfind("\n", 0, state.end) + 1))
         self.trigger_keys = tuple(trigger_keys)
         logger.debug("編集方式=%s / 対象=%r / 左文脈末尾=%r / 右文脈先頭=%r",
                      editor.kind, capture.source, capture.left_context[-self.config.context_chars:],
@@ -116,6 +120,10 @@ class EditorEngine:
         saved, editor, state = self.saved
         self.saved = None  # an edit token is consumed even on failure; never replay
         target, _ = capture.stamp
+        start, end, expected, caret = replacement_plan(capture, result)
+        if not result or "\x00" in result or len(expected) > self.config.max_document_chars:
+            raise ValueError("差し替え結果が空、不正、または本文上限を超えています")
+        logger.debug("部分置換=%s:%s / 結果=%r / 復元位置=%s", start, end, result, caret)
         wait_input_release(target, self.trigger_keys)
         if window_identity() != target:
             raise RuntimeError("待機中に入力先が変わったため中止しました")
@@ -128,10 +136,6 @@ class EditorEngine:
         # Activity during inference is harmless when the editor state is still
         # identical. Keep a fresh activity guard for the short mutation phase.
         tick = input_tick()
-        start, end, expected, caret = replacement_plan(capture, result)
-        if not result or "\x00" in result or len(expected) > self.config.max_document_chars:
-            raise ValueError("差し替え結果が空、不正、または本文上限を超えています")
-        logger.debug("部分置換=%s:%s / 結果=%r / 復元位置=%s", start, end, result, caret)
         # Verify again after reading the text, before making any selection.
         if window_identity() != target or input_tick() != tick:
             raise RuntimeError("適用直前に操作があったため中止しました")
@@ -207,15 +211,20 @@ def _worker(connection, config, debug, timings=False):
     if timings:
         logging.getLogger("kana_rewriter.timing").setLevel(logging.DEBUG)
     engine = EditorEngine(config)
+    request_id = 0
     try:
         while True:
             method, args = connection.recv()
             if method == "close":
                 break
+            request_id += 1
+            logger.debug("ワーカー要求開始: id=%s / method=%s", request_id, method)
             try:
                 result = (True, getattr(engine, method)(*args))
             except Exception as exc:
+                logger.debug("ワーカー要求失敗: id=%s / method=%s", request_id, method, exc_info=True)
                 result = (False, str(exc))
+            logger.debug("ワーカー要求終了: id=%s / success=%s", request_id, result[0])
             connection.send((*result, diagnostics.export()))
     except (EOFError, BrokenPipeError, KeyboardInterrupt):
         pass
@@ -268,7 +277,9 @@ class Desktop:
         return self._call("capture", mode, max_chars, trigger_keys)
 
     def capture_commit(self, text, target, runtime=None):
-        return self._call("capture", "commit", self.config.max_chars, (0x0D,), text, target, runtime)
+        # Enter has already committed through TSF. Do not wait for its key-up;
+        # the editor state, focus, and IME checks still gate the replacement.
+        return self._call("capture", "commit", self.config.max_chars, (), text, target, runtime)
 
     def focus_runtime(self):
         return self._call("focus_runtime")

@@ -14,20 +14,26 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def package(output, model):
-    if sys.platform != "win32" or struct.calcsize("P") != 8 or sys.implementation.name != "cpython":
-        raise RuntimeError("Run with 64-bit Windows CPython from the working environment")
-    manifest = ROOT / "build/tsf-probe/latest.json"
+def tsf_artifact(directory, source, build_script):
+    manifest = ROOT / "build" / directory / "latest.json"
     build_info = json.loads(manifest.read_text(encoding="utf-8-sig"))
     dll_name = build_info["dll"]
     if not isinstance(dll_name, str) or Path(dll_name).name != dll_name or not dll_name.endswith(".dll"):
         raise RuntimeError("Invalid TSF build manifest")
     dll = manifest.parent / dll_name
     if not dll.is_file():
-        raise RuntimeError("Build the TSF DLL first with scripts/build_tsf_probe.ps1")
-    source_hash = hashlib.sha256((ROOT / "native/tsf_probe.cpp").read_bytes()).hexdigest()
+        raise RuntimeError(f"Build the TSF DLL first with scripts/{build_script}")
+    source_hash = hashlib.sha256((ROOT / "native" / source).read_bytes()).hexdigest()
     if build_info.get("source_sha256") != source_hash:
-        raise RuntimeError("TSF DLL is stale or has no source hash; run scripts/build_tsf_probe.ps1 again")
+        raise RuntimeError(f"TSF DLL is stale or has no source hash; run scripts/{build_script} again")
+    return manifest, dll, dll_name
+
+
+def package(output, model):
+    if sys.platform != "win32" or struct.calcsize("P") != 8 or sys.implementation.name != "cpython":
+        raise RuntimeError("Run with 64-bit Windows CPython from the working environment")
+    artifacts = [tsf_artifact("tsf-probe", "tsf_probe.cpp", "build_tsf_probe.ps1"),
+                 tsf_artifact("tsf-edit-probe", "tsf_edit_probe.cpp", "build_tsf_edit_probe.ps1")]
     if model and not model.is_file():
         raise FileNotFoundError(model)
     staging = (ROOT / "build").resolve()
@@ -40,10 +46,11 @@ def package(output, model):
         shutil.copytree(ROOT / "kana_rewriter", bundle / "kana_rewriter", ignore=ignore)
         shutil.copy2(ROOT / "config.example.toml", bundle / "config.toml")
         shutil.copy2(ROOT / "docs/WINDOWS_DISTRIBUTION.md", bundle / "README.md")
-        target = bundle / "build/tsf-probe"
-        target.mkdir(parents=True)
-        shutil.copy2(dll, target / dll_name)
-        shutil.copy2(manifest, target / "latest.json")
+        for manifest, dll, dll_name in artifacts:
+            target = bundle / "build" / manifest.parent.name
+            target.mkdir(parents=True)
+            shutil.copy2(dll, target / dll_name)
+            shutil.copy2(manifest, target / "latest.json")
         (bundle / "models").mkdir()
         if model:
             shutil.copy2(model, bundle / "models" / model.name)
@@ -75,9 +82,10 @@ def package(output, model):
             ':custom\r\n"%KANA_REWRITER_PYTHON%" "%~dp0launch.py" --config "%~dp0config.toml" %*\r\n'
             ':done\r\n'
             'if errorlevel 1 pause\r\n', encoding="ascii", newline="")
-        subprocess.run([sys.executable, "-I", "-c",
-                        "import ctypes; "
-                        f"ctypes.WinDLL({str(target / dll_name)!r})"], check=True, cwd=bundle, timeout=60)
+        for manifest, dll, dll_name in artifacts:
+            packaged_dll = bundle / "build" / manifest.parent.name / dll_name
+            subprocess.run([sys.executable, "-I", "-c", "import ctypes; "
+                            f"ctypes.WinDLL({str(packaged_dll)!r})"], check=True, cwd=bundle, timeout=60)
         subprocess.run([sys.executable, "-I", str(bundle / "launch.py"), "--help"],
                        check=True, cwd=bundle, stdout=subprocess.DEVNULL, timeout=30)
         hashes = {str(file.relative_to(bundle)).replace("\\", "/"):

@@ -363,7 +363,7 @@ class WatcherTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")
 class NormalLoopTests(unittest.TestCase):
-    def run_loop(self, commit=True, valid=True, manual=False):
+    def run_loop(self, commit=True, valid=True, manual=False, backend='uia', failure=None):
         from kana_rewriter.__main__ import run_windows
         from kana_rewriter import winapi as win
         calls = 0
@@ -392,24 +392,44 @@ class NormalLoopTests(unittest.TestCase):
                 patch("kana_rewriter.auto_ime.AutoImeMonitor") as monitor, \
                 patch("kana_rewriter.auto_ime.capture_commit", return_value="capture") as capture, \
                 patch("kana_rewriter.direct.Desktop") as desktop, \
+                patch('kana_rewriter.tsf_edit.TsfCommitEditor') as tsf_editor, \
                 patch("kana_rewriter.__main__.ThreadPoolExecutor") as pool, \
                 patch("kana_rewriter.__main__.apply_result", return_value=True) as apply, patch("builtins.print"):
             monitor.return_value.take.return_value = notice if commit and not manual else None
             monitor.return_value.begin.return_value = True
             monitor.return_value.valid.side_effect = [True, valid]
             pool.return_value.submit.return_value = future
+            desktop.return_value.capture_commit.return_value = 'capture'
+            tsf_editor.return_value.apply.return_value = True
+            tsf_editor.return_value.apply.side_effect = failure
+            from kana_rewriter.tsf_edit import RestartRequired
+            expected_code = 1 if isinstance(failure, RestartRequired) and backend == 'tsf' and not manual and valid else 0
             self.assertEqual(run_windows(Mock(), Config(auto_replace_on_ime_commit=True, hotkey_line="F8",
-                                                       hotkey_quit="Ctrl+Alt+Q")), 0)
+                                                       hotkey_quit="Ctrl+Alt+Q", ime_commit_backend=backend)), expected_code)
             if manual:
                 desktop.return_value.capture.assert_called_once()
                 capture.assert_not_called()
                 apply.assert_called_once()
+                tsf_editor.return_value.apply.assert_not_called()
             elif commit:
-                capture.assert_called_once()
-                self.assertEqual(apply.call_count, int(valid))
+                if backend == 'tsf':
+                    desktop.return_value.capture_commit.assert_called_once()
+                    capture.assert_not_called()
+                    apply.assert_not_called()
+                    self.assertEqual(tsf_editor.return_value.apply.call_count, int(valid))
+                else:
+                    capture.assert_called_once()
+                    self.assertEqual(apply.call_count, int(valid))
             monitor.return_value.close.assert_called_once()
             desktop.return_value.close.assert_called_once()
 
     def test_normal_startup_processes_commit_and_applies(self): self.run_loop()
     def test_input_during_inference_prevents_application(self): self.run_loop(valid=False)
     def test_manual_shortcut_can_be_used_with_auto_enabled(self): self.run_loop(manual=True)
+    def test_tsf_auto_commit_uses_direct_edit_without_uia_write(self): self.run_loop(backend='tsf')
+    def test_tsf_inference_change_prevents_edit(self): self.run_loop(backend='tsf', valid=False)
+    def test_tsf_manual_shortcut_retains_existing_backend(self): self.run_loop(backend='tsf', manual=True)
+    def test_tsf_failure_does_not_fallback(self): self.run_loop(backend='tsf', failure=RuntimeError('rejected'))
+    def test_tsf_unknown_result_exits_and_closes(self):
+        from kana_rewriter.tsf_edit import RestartRequired
+        self.run_loop(backend='tsf', failure=RestartRequired('unknown'))

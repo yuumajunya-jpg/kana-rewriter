@@ -70,7 +70,7 @@ class TrialGateTests(unittest.TestCase):
 
 class Fixture:
     def __enter__(self):
-        exe = Path(__file__).resolve().parents[1] / "build/tsf-probe/tsf-probe-fixture.exe"
+        exe = getattr(self, "executable", None) or (Path(__file__).resolve().parents[1] / "build/tsf-probe/tsf-probe-fixture.exe")
         self.process = subprocess.Popen([str(exe)], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.lines = queue.Queue()

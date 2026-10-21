@@ -40,13 +40,18 @@ def main():
     parser.add_argument("--right-context", default="", help="--textの右文脈")
     parser.add_argument("--debug", action="store_true", help="変換対象・文脈・モデル出力・編集方式を端末に表示")
     parser.add_argument("--timings", action="store_true", help="本文を表示せず、編集完了後に工程時間を表示")
+    parser.add_argument("--diagnostic-log", nargs="?", const="", metavar="PATH",
+                        help="詳細診断と端末出力をUTF-8ログへ保存（省略時logs/へ自動命名）")
     parser.add_argument("--inspect", action="store_true", help="3秒後の入力欄の直接編集能力を表示（文字変更なし）")
     parser.add_argument("--editor-worker", choices=("python", "native"), help="設定ファイルの編集ワーカーを今回だけ上書き")
+    parser.add_argument('--ime-commit-backend', choices=('uia', 'tsf'), help='IME確定後の置換方式を今回だけ上書き')
     parser.add_argument("--auto-replace-on-ime-commit", action=argparse.BooleanOptionalAction, default=None,
                         help="TSFによるEnter確定後の自動変換を今回だけ切り替え（Python直接編集のみ）")
     parser.add_argument("--benchmark-source", help="AIなし比較用の変換対象（完全一致時のみ置換）")
     parser.add_argument("--benchmark-result", help="AIなし比較用の固定変換結果")
     args = parser.parse_args()
+    if args.diagnostic_log is not None:
+        args.debug = True
     benchmarking = args.benchmark_source is not None or args.benchmark_result is not None
     if benchmarking and (not args.benchmark_source or not args.benchmark_result):
         parser.error("比較には空でない--benchmark-sourceと--benchmark-resultが必要です")
@@ -59,15 +64,32 @@ def main():
     if args.timings:
         logging.getLogger("kana_rewriter.timing").setLevel(logging.DEBUG)
         logger.setLevel(logging.DEBUG)
+    if args.diagnostic_log is not None:
+        from .diagnostic_log import DiagnosticLog
+        try:
+            with DiagnosticLog(args.diagnostic_log):
+                return _run(args, benchmarking)
+        except OSError as exc:
+            print(f"診断ログを開けません: {exc}", file=sys.stderr)
+            return 1
+    return _run(args, benchmarking)
+
+
+def _run(args, benchmarking):
     try:
         config = Config.load(args.config) if args.config else Config()
         overrides = {}
         if args.editor_worker:
             overrides["editor_worker"] = args.editor_worker
+        if args.ime_commit_backend:
+            overrides['ime_commit_backend'] = args.ime_commit_backend
         if args.auto_replace_on_ime_commit is not None:
             overrides["auto_replace_on_ime_commit"] = args.auto_replace_on_ime_commit
         if overrides:
             config = replace(config, **overrides)
+        logger.debug("診断設定: edit_backend=%s / editor_worker=%s / auto_ime=%s / timeout=%s",
+                     config.edit_backend, config.editor_worker,
+                     config.auto_replace_on_ime_commit, config.editor_timeout_seconds)
         if benchmarking and config.edit_backend == "clipboard":
             raise RuntimeError("編集ワーカー比較には直接編集の設定を使用してください")
         converter = FixedConverter(args.benchmark_source, args.benchmark_result) if benchmarking else Converter(config)
@@ -112,6 +134,7 @@ def run_windows(converter, config, debug=False, timings=False):
     actions = {}
     japanese_release = None
     auto_monitor = None
+    tsf_editor = None
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
     if config.edit_backend == "clipboard":
@@ -142,14 +165,19 @@ def run_windows(converter, config, debug=False, timings=False):
             desktop.warmup()
         if config.auto_replace_on_ime_commit:
             from .auto_ime import AutoImeMonitor
-            auto_monitor = AutoImeMonitor(config, waiter.wake)
+            if config.ime_commit_backend == 'tsf':
+                from .tsf_edit import TsfCommitEditor
+                tsf_editor = TsfCommitEditor(config.tsf_edit_path)
+                auto_monitor = AutoImeMonitor(config, waiter.wake, probe_factory=tsf_editor.probe_factory)
+            else:
+                auto_monitor = AutoImeMonitor(config, waiter.wake)
             auto_monitor.start()
         flush_logs()
         quit_label = f" / {bindings[3].label} = 終了" if 3 in bindings else ""
         print(f"起動: {bindings[1].label} = カーソル左の区切りまで / "
               f"{bindings[2].label} = 選択範囲{quit_label} / この端末でCtrl+C = 終了", flush=True)
         if auto_monitor is not None:
-            print("IME確定後の自動変換: 有効（TSF・Enter確定／入力先に追従）", flush=True)
+            print(f"IME確定後の自動変換: 有効（置換={config.ime_commit_backend}／Enter確定／入力先に追従）", flush=True)
         message = W.MSG()
         while True:
             while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
@@ -172,7 +200,7 @@ def run_windows(converter, config, debug=False, timings=False):
                                                    config.max_chars, trigger_keys=trigger_keys)
                         capture_seconds = time.perf_counter() - started
                         future = pool.submit(timed_conversion, converter, captured)
-                        pending = (future, captured, started, capture_seconds, japanese_trigger, None)
+                        pending = (future, captured, started, capture_seconds, japanese_trigger, None, None)
                         future.add_done_callback(waiter.wake)
                         print("変換中…", flush=True)
                     except Exception as exc:
@@ -186,12 +214,14 @@ def run_windows(converter, config, debug=False, timings=False):
                     try:
                         from .auto_ime import capture_commit
                         started = time.perf_counter()
-                        captured = capture_commit(desktop, auto_monitor, commit)
+                        prepared = tsf_editor.prepare(commit) if tsf_editor is not None else None
+                        captured = (desktop.capture_commit(commit.text, commit.focus.target, commit.focus.runtime)
+                                    if prepared is not None else capture_commit(desktop, auto_monitor, commit))
                         capture_seconds = time.perf_counter() - started
                         if not auto_monitor.valid(commit):
                             raise RuntimeError("取得中に入力・フォーカスが変わったため中止しました")
                         future = pool.submit(timed_conversion, converter, captured)
-                        pending = (future, captured, started, capture_seconds, False, commit)
+                        pending = (future, captured, started, capture_seconds, False, commit, prepared)
                         future.add_done_callback(waiter.wake)
                         print("IME確定: 変換中…", flush=True)
                     except Exception as exc:
@@ -199,7 +229,7 @@ def run_windows(converter, config, debug=False, timings=False):
                         flush_logs()
                         print(f"自動変換を中止: {exc}", flush=True)
             if pending is not None and pending[0].done():
-                future, captured, started, capture_seconds, japanese_trigger, auto_commit = pending
+                future, captured, started, capture_seconds, japanese_trigger, auto_commit, prepared = pending
                 pending = None
                 try:
                     result, inference_seconds = future.result()
@@ -208,7 +238,8 @@ def run_windows(converter, config, debug=False, timings=False):
                         japanese_release.wait_released()
                     if auto_commit is not None and not auto_monitor.valid(auto_commit):
                         raise RuntimeError("推論中に入力・フォーカスが変わったため自動変換を中止しました")
-                    changed = apply_result(desktop, captured, result)
+                    changed = (tsf_editor.apply(prepared, captured, result) if prepared is not None
+                               else apply_result(desktop, captured, result))
                     finished = time.perf_counter()
                     logger.debug("時間集計: 取得=%.1fms / AI=%.1fms / 適用=%.1fms / AI以外=%.1fms / 合計=%.1fms",
                                  capture_seconds * 1000, inference_seconds * 1000,
@@ -220,6 +251,10 @@ def run_windows(converter, config, debug=False, timings=False):
                 except Exception as exc:
                     flush_logs()
                     print(f"中止: {exc}", flush=True)
+                    if prepared is not None:
+                        from .tsf_edit import RestartRequired
+                        if isinstance(exc, RestartRequired):
+                            return 1
                 finally:
                     if auto_monitor is not None:
                         auto_monitor.finish()

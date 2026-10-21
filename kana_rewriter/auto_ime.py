@@ -44,6 +44,7 @@ class Commit:
     focus: Focus
     tick: int
     revision: int
+    native_range: tuple | None = None
 
 
 class CommitState:
@@ -97,17 +98,32 @@ class CommitState:
             for event in events:
                 if (self.focus is None or event["tid"] != self.focus.tid
                         or event["pid"] != self.focus.target[2]):
+                    if event["kind"] == 4:
+                        logger.debug("TSF確定判定: 入力先不一致 / pid=%s tid=%s / focus=%r",
+                                     event["pid"], event["tid"], self.focus)
                     continue
                 if invalidates_commit(event):
+                    if self.pending is not None:
+                        logger.debug("TSF確定判定: 保留確定を破棄 / event=%s key=%s / revision=%s",
+                                     event["kind"], event["key"], self.revision)
                     self.revision += 1
                     self.pending = None
                     self.changed.notify_all()
                 if self.closed or self.busy:
+                    if event["kind"] == 4:
+                        logger.debug("TSF確定判定: 受付停止 / closed=%s busy=%s", self.closed, self.busy)
                     continue
                 valid, reason = eligible(event, now, self.focus.target)
+                if event["kind"] == 4:
+                    logger.debug("TSF確定判定: eligible=%s reason=%s / now=%s tick=%s "
+                                 "composition_tick=%s accept_since=%s / revision=%s",
+                                 valid, reason, now, event["tick"], event["composition_tick"],
+                                 self.accept_since, self.revision)
                 if valid and self.accept_since <= event["composition_tick"] <= event["tick"]:
                     text = event["text"].replace("\r\n", "\n").replace("\r", "\n")
-                    self.pending = Commit(text, self.focus, event["tick"], self.revision)
+                    native_range = ((event['commit_id'], event['revision'], event['text'])
+                                    if 'commit_id' in event and 'revision' in event else None)
+                    self.pending = Commit(text, self.focus, event["tick"], self.revision, native_range)
                 elif event["kind"] == 4 and reason == "ctrl_confirm":
                     logger.debug("TSF自動変換: Ctrl+Enterのため置換しません")
 

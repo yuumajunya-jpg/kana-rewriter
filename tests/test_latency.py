@@ -74,6 +74,15 @@ class LatencyTests(unittest.TestCase):
         editor.replace.assert_not_called()
         self.assertIsNone(engine.saved)
 
+    def test_ime_commit_capture_does_not_wait_for_enter_keyup(self):
+        from kana_rewriter.direct import Desktop
+        config = Config()
+        desktop = Desktop(config)
+        with patch.object(desktop, "_call", return_value="capture") as call:
+            self.assertEqual(desktop.capture_commit("散歩", (1, 2, 3)), "capture")
+        call.assert_called_once_with("capture", "commit", config.max_chars, (),
+                                     "散歩", (1, 2, 3), None)
+
     def test_release_wait_cancels_on_focus_change_or_timeout(self):
         from kana_rewriter import direct_win32 as win
         with patch.object(win, "window_identity", return_value=(4, 5, 6)):

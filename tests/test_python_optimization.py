@@ -42,7 +42,6 @@ class OptimizedUiaTests(unittest.TestCase):
         self.assertEqual(editor.confirm_expected(state), "text_changed")
 
     def test_document_change_during_expected_check_is_not_accepted(self):
-        from kana_rewriter.direct_uia import SnapshotPending
         editor, model = self.prepare()
         expected = editor.read()
         original = editor.get_text
@@ -50,13 +49,11 @@ class OptimizedUiaTests(unittest.TestCase):
         def mutate(range_):
             nonlocal calls
             calls += 1
-            result = original(range_)
             if calls == 2:
                 model.text = model.text[:-1] + "外"
-            return result
+            return original(range_)
         with patch.object(editor, "get_text", side_effect=mutate):
-            with self.assertRaises(SnapshotPending):
-                editor.expected_once(expected)
+            self.assertEqual(editor.expected_once(expected), "text_changed")
 
     def test_matching_probe_still_checks_exact_focus(self):
         editor, _ = self.prepare()

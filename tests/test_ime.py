@@ -9,13 +9,17 @@ from unittest.mock import patch
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class ImeTests(unittest.TestCase):
     @contextmanager
-    def control(self, opened=True, effective=True):
+    def control(self, opened=True, effective=True, flush=True):
         from kana_rewriter import ime
-        state = SimpleNamespace(opened=opened, setters=[])
+        state = SimpleNamespace(opened=opened, setters=[], flushes=0)
 
         def message(hwnd, code, command, value, flags, timeout, output):
-            self.assertEqual((hwnd, code), (99, 0x0283))
             result = C.cast(output, C.POINTER(C.c_size_t))
+            if (hwnd, code) == (2, 0):
+                state.flushes += 1
+                result.contents.value = 0
+                return 1 if flush else 0
+            self.assertEqual((hwnd, code), (99, 0x0283))
             if command == 5:
                 result.contents.value = int(state.opened)
             elif command == 6:
@@ -42,6 +46,7 @@ class ImeTests(unittest.TestCase):
             session.close()
             self.assertTrue(state.opened)
             self.assertEqual(state.setters, [False, True])
+            self.assertEqual(state.flushes, 1)
 
     def test_original_off_is_not_enabled_after_edit(self):
         with self.control(opened=False) as (ime, state):
@@ -50,6 +55,7 @@ class ImeTests(unittest.TestCase):
             session.close()
             self.assertFalse(state.opened)
             self.assertEqual(state.setters, [])
+            self.assertEqual(state.flushes, 0)
 
     def test_ineffective_switch_is_rejected(self):
         with self.control(effective=False) as (ime, state):
@@ -60,6 +66,16 @@ class ImeTests(unittest.TestCase):
             session.close()
             self.assertTrue(state.opened)
             self.assertEqual(state.setters, [False])
+            self.assertEqual(state.flushes, 0)
+
+    def test_target_thread_flush_failure_is_rejected(self):
+        with self.control(flush=False) as (ime, state):
+            session = ime.ImeSession((1, 2, 3))
+            with self.assertRaisesRegex(RuntimeError, "入力先同期"):
+                session.disable()
+            session.close()
+            self.assertTrue(state.opened)
+            self.assertEqual(state.setters, [False, True])
 
     def test_focus_change_does_not_modify_new_input_target(self):
         with self.control() as (ime, state):

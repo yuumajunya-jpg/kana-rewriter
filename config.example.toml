@@ -12,6 +12,8 @@ hotkey_selection = "Ctrl+Shift+Enter" # 選択範囲を変換
 # "半角/全角"、"HankakuZenkaku"なども同じキー。設定変更後は再起動
 hotkey_quit = "" # 任意の終了キー。例: "Ctrl+Alt+Q"。空文字列なら登録しない
 auto_replace_on_ime_commit = false # true: TSFでEnterを伴うIME確定後に確定範囲を自動変換。Ctrl+Enter確定は置換しない。Python直接編集のみ
+ime_commit_backend = "tsf" # 自動確定の置換方式: tsf=確定範囲へ直接編集、uia=従来方式。失敗後の切り替えなし
+# tsf_edit_path = "build/tsf-edit-probe/kana-tsf-edit-<ビルド時刻>.dll" # 省略時は最新ビルド
 # tsf_monitor_path = "build/tsf-probe/kana-tsf-probe-<ビルド時刻>.dll" # 空・省略時は最新ビルドを使用
 edit_backend = "auto" # auto: 標準Edit/RichEditはWin32、それ以外はUIA。clipboardで旧方式
 editor_worker = "python" # C++版をビルドして比較する場合は "native"。推論バックエンドとは独立

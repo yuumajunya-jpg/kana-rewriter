@@ -8,8 +8,13 @@
 | [設定例](../config.example.toml) | 全設定項目 |
 | [Windows配布版](WINDOWS_DISTRIBUTION.md) | 既存Pythonで使うアプリ・TSF DLLのZIPの作成と利用 |
 | [編集処理の詳細](EDITOR_DETAILS.md) | 変換範囲・IME・中止条件・UIAの制約 |
+| [IME相互作用テスト](IME_TEST_DESIGN.md) | IME一時オフ・選択・送信・復元の回帰試験と不変条件 |
+| [Obsidianの箇条書き選択](OBSIDIAN_LIST_SELECTION.md) | UIA選択方式への復元、以前の変更・試験の経緯と制限 |
+| [ObsidianのIME確定後の根本原因](OBSIDIAN_IME_ROOT_CAUSE.md) | DOM・CodeMirror・UIAログから特定した選択解除の実行順競合 |
+| [TSF直接編集の検証と統合](TSF_DIRECT_EDIT_TRIAL.md) | 確定範囲の直接置換、合成アプリ・実機での検証と通常起動への統合 |
 | [Python編集処理の比較](../PYTHON_EDITOR_COMPARISON.md) | 現行版の最適化・AIなし比較・手動試行 |
 | [モデル資料](../MODELS.md) | 調査時点の候補・固定GGUF・入力形式 |
+| [変換後の修正モデル](POST_CONVERSION_MODELS.md) | タイポ・誤変換・文法の専用モデル／検出器／小型LLM、導入・評価案（2026-10-13、実推論未検証） |
 | [初回GitHub公開](GITHUB_PUBLISH.md) | 利用者自身による初回pushの手順 |
 
 ## 実験・過去の調査記録

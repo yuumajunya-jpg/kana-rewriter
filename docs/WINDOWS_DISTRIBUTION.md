@@ -1,12 +1,12 @@
 # ビルド環境なしで使う Windows 配布版
 
-配布ZIPにはアプリとビルド済みTSF監視DLLを含めます。Python本体と依存パッケージは同梱せず、利用先の64ビットPython 3.11以上と、インストール済みの`llama-cpp-python`・`comtypes`を使います。利用先にC++コンパイラーやCMakeは不要です。Windows x64向けです。ARM64ネイティブ版は作成しません。
+配布ZIPにはアプリとビルド済みのTSF監視DLL・TSF編集DLLを含めます。Python本体と依存パッケージは同梱せず、利用先の64ビットPython 3.11以上と、インストール済みの`llama-cpp-python`・`comtypes`を使います。利用先にC++コンパイラーやCMakeは不要です。Windows x64向けです。ARM64ネイティブ版は作成しません。
 
 ## 利用するPC
 
 1. ZIPをすべて展開します。ZIP内から直接起動しないでください。
 2. `models`にGGUFモデルを置き、`config.toml`の`model_path`と`model_format`を合わせます。モデル同梱版なら設定済みです。
-3. IME確定後の自動変換を使う場合、`config.toml`の`auto_replace_on_ime_commit`を`true`にします。
+3. IME確定後の自動変換を使う場合、`config.toml`の`auto_replace_on_ime_commit`を`true`、`ime_commit_backend`を`"tsf"`にします。設定例にはTSF方式を指定済みです。
 4. `start.cmd`をダブルクリックします。終了は開いた端末でCtrl+Cです。
 
 公開ReleaseのZIPはモデルを含みません。既定のモデルは展開先で次のように取得できます。
@@ -46,6 +46,7 @@ start.cmd --text "はいしゃ" --left-context "歯が痛いので、"
 
 ```powershell
 .\scripts\build_tsf_probe.ps1
+.\scripts\build_tsf_edit_probe.ps1
 .\.venv\Scripts\python.exe scripts/package_windows.py
 ```
 

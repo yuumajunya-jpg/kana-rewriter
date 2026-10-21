@@ -1,9 +1,14 @@
 """Small Win32 adapter; no admin rights or third-party packages required."""
 import ctypes as C
 from ctypes import wintypes as W
+import os
 
 
 user = C.WinDLL("user32", use_last_error=True)
+
+# Origin marker shared by SendInput and this process's activity monitor.
+# Do not exclude all injected input: another program can still change the edit.
+SELF_INPUT_TAG = int.from_bytes(os.urandom(C.sizeof(C.c_size_t)), "little") or 1
 
 
 class KeyboardInput(C.Structure):
@@ -78,7 +83,8 @@ class MessageWaiter:
 
 
 def send(events):
-    inputs = (Input * len(events))(*(Input(1, InputUnion(keyboard=e)) for e in events))
+    inputs = (Input * len(events))(*(Input(1, InputUnion(keyboard=KeyboardInput(
+        e.vk, e.scan, e.flags, e.time, SELF_INPUT_TAG))) for e in events))
     if user.SendInput(len(inputs), inputs, C.sizeof(Input)) != len(inputs):
         raise RuntimeError("キー送信に失敗しました。対象アプリの権限を確認してください")
 

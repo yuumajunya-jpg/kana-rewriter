@@ -1,13 +1,19 @@
 """Count editing input without counting pointer motion or key releases.
 
-Hooks only count event kinds; they never inspect, store, or suppress key data.
+Hooks inspect event kinds and origin metadata, never key values or text.
+They never store or suppress input.
 The message loop runs separately from blocking UIA/Win32 calls.
 """
 import ctypes as C
 from ctypes import wintypes as W
 import threading
 
-from .winapi import user
+from .winapi import user, SELF_INPUT_TAG
+
+
+class KeyboardHookData(C.Structure):
+    _fields_ = [("vk", W.DWORD), ("scan", W.DWORD), ("flags", W.DWORD),
+                ("time", W.DWORD), ("extra", C.c_size_t)]
 
 
 HOOKPROC = C.WINFUNCTYPE(W.LPARAM, C.c_int, W.WPARAM, W.LPARAM)
@@ -56,7 +62,11 @@ class InputActivity:
 
     def _keyboard(self, code, message, data):
         if code == 0 and message in KEY_MESSAGES:
-            self.counter += 1
+            event = C.cast(data, C.POINTER(KeyboardHookData)).contents if data else None
+            own = (event is not None and event.flags & 0x10
+                   and event.extra == SELF_INPUT_TAG)
+            if not own:
+                self.counter += 1
         return user.CallNextHookEx(None, code, message, data)
 
     def _mouse(self, code, message, data):

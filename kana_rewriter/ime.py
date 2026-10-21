@@ -38,6 +38,17 @@ class ImeSession:
                 raise RuntimeError("IME状態の切り替えを確認できません。文字入力は再送しません")
             time.sleep(0.01)
 
+    def flush_target_thread(self):
+        """Process the target's pending IME notification before selecting."""
+        if window_identity() != self.target:
+            raise RuntimeError("IME切り替え中に入力先が変わりました")
+        result = C.c_size_t()
+        # SMTO_BLOCK | SMTO_ABORTIFHUNG: WM_NULL is processed by the target
+        # thread, and the 500 ms limit is enforced if that thread hangs.
+        if not user.SendMessageTimeoutW(self.target[1], 0, 0, 0, 0x03,
+                                        500, C.byref(result)):
+            raise RuntimeError("IME切り替え後の入力先同期を確認できません。文字入力は再送しません")
+
     def disable(self):
         if window_identity() != self.target:
             raise RuntimeError("IME切り替え前に入力先が変わりました")
@@ -48,6 +59,12 @@ class ImeSession:
             self.set_open(False)
         if self.is_open():
             raise RuntimeError("IMEが有効なためUnicode入力を中止しました")
+        if self.changed:
+            # The open-status change is delivered to the target thread as a
+            # notification. A round trip to that thread processes it before
+            # the caller selects the replacement range.
+            self.flush_target_thread()
+            logger.debug("IME入力制御: 入力先スレッド同期済み")
         logger.debug("IME入力制御: off確認済み")
 
     def close(self):

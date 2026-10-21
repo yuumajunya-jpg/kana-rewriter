@@ -21,6 +21,9 @@ public:
     TS_SELECTION_ACP selection{0,3,{TS_AE_END,FALSE}};
     HWND window=nullptr;
     bool locked=false;
+    bool asynchronous_locks=false;
+    DWORD pending_lock=0;
+    bool stall_read_once=false;
     void sync_window() {
         SendMessageW(window,WM_SETTEXT,0,reinterpret_cast<LPARAM>(text.c_str()));
         SendMessageW(window,EM_SETSEL,text.size(),text.size());
@@ -39,6 +42,12 @@ public:
     HRESULT STDMETHODCALLTYPE UnadviseSink(IUnknown*) override { sink.Reset(); return S_OK; }
     HRESULT STDMETHODCALLTYPE RequestLock(DWORD flags,HRESULT* result) override {
         if (locked) { *result=TS_E_SYNCHRONOUS; return S_OK; }
+        if (asynchronous_locks) {
+            if (flags&TS_LF_SYNC) { *result=TS_E_SYNCHRONOUS; return S_OK; }
+            pending_lock=flags; *result=TS_S_ASYNC;
+            PostThreadMessageW(GetCurrentThreadId(),WM_APP+42,0,0);
+            return S_OK;
+        }
         locked=true; *result=sink->OnLockGranted(flags); locked=false; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetStatus(TS_STATUS* status) override { *status={0,TS_SS_NOHIDDENTEXT}; return S_OK; }
@@ -54,6 +63,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetText(LONG start,LONG end,WCHAR* out,ULONG size,ULONG* count,
         TS_RUNINFO* runs,ULONG run_size,ULONG* run_count,LONG* next) override {
         if (!locked) return TS_E_NOLOCK;
+        if (stall_read_once) { stall_read_once=false; Sleep(400); } // test-only slow validation
         if (end==-1) end=static_cast<LONG>(text.size());
         if (start<0 || end<start || end>static_cast<LONG>(text.size())) return TS_E_INVALIDPOS;
         ULONG n=std::min(size,static_cast<ULONG>(end-start));
@@ -111,6 +121,17 @@ public:
     ULONG STDMETHODCALLTYPE Release() override { auto n=--refs; if (!n) delete this; return n; }
     HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+        if (operation=="reset") {
+            if (*composition) return E_UNEXPECTED;
+            ComPtr<ITfRange> range,end;
+            HRESULT hr=context->GetStart(cookie,&range);
+            if (SUCCEEDED(hr)) hr=context->GetEnd(cookie,&end);
+            if (SUCCEEDED(hr)) hr=range->ShiftEndToRange(cookie,end.Get(),TF_ANCHOR_END);
+            if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,L"さんぽ",3);
+            if (FAILED(hr)) return hr;
+            TF_SELECTION selected{range.Get(),{TF_AE_END,FALSE}};
+            return context->SetSelection(cookie,1,&selected);
+        }
         if (operation=="begin") {
             TF_SELECTION selection{}; ULONG count=0;
             HRESULT hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
@@ -152,11 +173,22 @@ int main() {
     bool running=true;
     while (running) {
         MSG message{};
-        while (PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        while (PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
+            if (message.message==WM_APP+42 && store->pending_lock) {
+                DWORD flags=store->pending_lock; store->pending_lock=0;
+                store->locked=true; store->sink->OnLockGranted(flags); store->locked=false;
+            } else { TranslateMessage(&message); DispatchMessageW(&message); }
+        }
         DWORD bytes=0;
         if (PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE),nullptr,0,nullptr,&bytes,nullptr) && bytes) {
             std::string operation; std::getline(std::cin,operation);
             if (operation=="exit") running=false;
+            else if (operation=="async") { store->asynchronous_locks=true; std::cout<<"RESULT 0 0"<<std::endl; }
+            else if (operation=="stallread") { store->stall_read_once=true; std::cout<<"RESULT 0 0"<<std::endl; }
+            else if (operation=="stall") {
+                std::cout<<"RESULT 0 0"<<std::endl;
+                Sleep(200); // test-only blocked target, never an editor delay
+            }
             else {
                 ComPtr<Session> session; session.Attach(new Session());
                 session->context=context; session->composition=std::addressof(composition); session->operation=operation;

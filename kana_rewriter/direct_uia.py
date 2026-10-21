@@ -276,24 +276,19 @@ class AutomationEditor:
             raise SnapshotPending("UIA選択範囲の本文が一致しません")
         # A range is live: even Clone() does not freeze the document content.
         # Reject mixed generations, including changes outside the selection.
-        if self.get_text(self.pattern.DocumentRange) != text:
+        if self.get_text(document) != text:
             raise SnapshotPending("本文の読み取り中に内容が更新されました")
         position = (getattr(self, "selection_source", "GetSelection"), len(text), start, end)
         if getattr(self, "last_position", None) != position:
             logger.debug("UIA位置: %s / 本文=%s文字 / 選択=%s:%s", *position)
             self.last_position = position
         self.check_focus()
-        state = TextState(text, start, end)
-        self.read_anchor = (state, selection)  # live; revalidated by range_for
-        return state
+        return TextState(text, start, end)
 
     @stage("UIA/期待状態専用確認")
     def expected_once(self, expected, document=None):
         if document is None:
             document = self.pattern.DocumentRange
-            if self.get_text(document) != expected.text:
-                self.check_focus()
-                return "text_changed"
         self.validate_label(expected.text)
         if not 0 <= expected.start <= expected.end <= len(expected.text):
             raise RuntimeError("期待する選択位置が不正です")
@@ -314,16 +309,19 @@ class AutomationEditor:
         if correct:
             prefix = document.Clone()
             prefix.MoveEndpointByRange(1, selected, 0)
+            # The selected text plus its left prefix determine the right
+            # boundary textually. The final full-document read below verifies
+            # that the provider did not mix document generations.
             correct = self.get_text(prefix) == expected.text[:expected.start]
-            if correct and expected.start != expected.end:
-                prefix.MoveEndpointByRange(1, selected, 1)
-                correct = self.get_text(prefix) == expected.text[:expected.end]
-        if self.get_text(self.pattern.DocumentRange) != expected.text:
-            raise SnapshotPending("期待状態の確認中に本文が変更されました")
+        if self.get_text(document) != expected.text:
+            # Do not retry with a mixed document generation. The caller can
+            # abort immediately for a selection check, or probe again after a
+            # readback.
+            self.check_focus()
+            return "text_changed"
         self.check_focus()
         if not correct:
             return "position_changed"
-        self.read_anchor = (expected, selected)
         return "match"
 
     def confirm_expected(self, expected, focus_checked=False):
@@ -386,8 +384,9 @@ class AutomationEditor:
                 if remaining <= 0:
                     raise RuntimeError("差し替え結果を確認できませんでした。本文を確認してください。編集は再送しません")
                 # Fast initial probes; bounded backoff avoids busy polling a
-                # slow/unresponsive provider. No nested 0.5-second read loop.
-                delay = min(0.002 if probes <= 2 else 0.005 if probes <= 5 else 0.01, remaining)
+                # slow/unresponsive provider. Each probe is already a UIA round
+                # trip, so the sleep only needs to yield briefly.
+                delay = min(0.001 if probes <= 3 else 0.002 if probes <= 6 else 0.005, remaining)
                 started = time.perf_counter()
                 poll_sleep(delay)
                 sleep_seconds += time.perf_counter() - started
@@ -418,51 +417,32 @@ class AutomationEditor:
     @stage("UIA/範囲構築")
     def range_for(self, state, start, end):
         document = self.pattern.DocumentRange
-        if self.get_text(document) != state.text:
-            raise RuntimeError("文字範囲の準備中に本文が変更されました")
-        anchor = getattr(self, "read_anchor", None)
-        nearby = (anchor[1] if anchor is not None and anchor[0] == state else self.selection()).Clone()
-        if (start, end) != (state.start, state.end):
-            nearby.MoveEndpointByRange(0, nearby, 1)
-            if end != state.end:
-                nearby.MoveEndpointByUnit(1, 0, end - state.end)
-                nearby.MoveEndpointByRange(0, nearby, 1)
-            if start != end:
-                nearby.MoveEndpointByUnit(0, 0, start - end)
-        if self.range_matches(document, nearby, state.text, start, end):
-            return nearby
-        # Keep verified document-based fallbacks for unusual provider units.
-        begin = self.point(document, state.text, start)
+        # Build the target from DocumentRange, never from GetSelection().
+        # Chromium keeps the provider anchors of a selection-derived range.
+        # Its UIA Select() then returns success without applying the range when
+        # an endpoint is in a list marker or another accessibility tree. GetText()
+        # still reads such a range correctly, so verifying its text alone cannot
+        # detect this.
+        #
+        # Anchor the range from the verified right endpoint and move the left
+        # endpoint backwards. Constructing the left endpoint from the document
+        # prefix can retain the preceding block's anchor (for example, at the
+        # end of a Markdown list), so Select() leaves the live caret untouched
+        # even though the range reads the requested text.
         finish = self.point(document, state.text, end)
-        begin.MoveEndpointByRange(1, finish, 1)
-        if self.range_matches(document, begin, state.text, start, end):
-            return begin
-        logger.debug("UIA範囲再構築: 要求=%s:%s / 要求文字=%r / 実際文字=%r",
-                     start, end, state.text[start:end], self.get_text(begin))
-        # Paragraph boundaries may have distinct provider anchors with the same
-        # prefix text. Collapsing the left prefix can retain the preceding blank
-        # paragraph's anchor. Build backwards from the right endpoint instead;
-        # never trim the returned text or select an unverified range.
-        anchors = [finish]
-        if end == state.end:
-            live = self.selection().Clone()
-            live.MoveEndpointByRange(0, live, 1)
-            anchors.append(live)
-        for anchor in anchors:
-            candidate = anchor.Clone()
-            candidate.MoveEndpointByUnit(0, 0, start - end)
-            for _ in range(8):
-                if self.range_matches(document, candidate, state.text, start, end):
-                    logger.debug("UIA範囲再構築: 末尾からの移動で一致=%s:%s", start, end)
-                    return candidate
-                prefix = document.Clone()
-                prefix.MoveEndpointByRange(1, candidate, 0)
-                left = self.get_text(prefix)
-                if not state.text.startswith(left):
-                    break
-                delta = start - len(left)
-                if not delta or not candidate.MoveEndpointByUnit(0, 0, delta):
-                    break
+        candidate = finish.Clone()
+        candidate.MoveEndpointByUnit(0, 0, start - end)
+        for _ in range(8):
+            if self.range_matches(document, candidate, state.text, start, end):
+                return candidate
+            prefix = document.Clone()
+            prefix.MoveEndpointByRange(1, candidate, 0)
+            left = self.get_text(prefix)
+            if not state.text.startswith(left):
+                break
+            delta = start - len(left)
+            if not delta or not candidate.MoveEndpointByUnit(0, 0, delta):
+                break
         raise RuntimeError(f"UIAの置換対象範囲を確認できませんでした（要求{start}:{end}）。"
                            "文字は送信していません。--debugで範囲の診断を確認できます")
 
@@ -473,12 +453,59 @@ class AutomationEditor:
         prefix.MoveEndpointByRange(1, range_, 0)
         if self.get_text(prefix) != text[:start]:
             return False
-        prefix.MoveEndpointByRange(1, range_, 1)
-        if self.get_text(prefix) != text[:end]:
-            return False
-        if self.get_text(self.pattern.DocumentRange) != text:
+        # The range text and left prefix already determine the right boundary.
+        # The full-document read below detects a mixed generation.
+        if self.get_text(document) != text:
             raise RuntimeError("文字範囲の準備中に本文が変更されました")
         return True
+
+    def log_selection_failure(self, phase, state, start, end, requested):
+        """Extra provider reads only AFTER aborting; never retry an edit."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        report = {"phase": phase, "wanted": [start, end], "document_chars": len(state.text),
+                  "source": state.text[start:end], "window": self.window,
+                  "captured_runtime": getattr(self, "runtime_id", None)}
+        try:
+            if window_identity() != self.window:
+                report["focus_changed"] = True
+                return
+            document = self.pattern.DocumentRange
+            report["document_matches"] = self.get_text(document) == state.text
+
+            def describe(range_):
+                detail = {"text": self.get_text(range_)}
+                for label, endpoint in (("start", 0), ("end", 1)):
+                    try:
+                        prefix = document.Clone()
+                        prefix.MoveEndpointByRange(1, range_, endpoint)
+                        point = range_.Clone()
+                        point.MoveEndpointByRange(1 - endpoint, point, endpoint)
+                        element = point.GetEnclosingElement()
+                        detail[label] = {"offset": len(self.get_text(prefix)),
+                                         "runtime": list(element.GetRuntimeId()),
+                                         "class": element.CurrentClassName,
+                                         "control": element.CurrentControlType,
+                                         "name": str(element.CurrentName)[:80]}
+                    except Exception as exc:
+                        detail[label] = {"read_error": str(exc)}
+                return detail
+
+            report["requested_after_abort"] = describe(requested)
+            ranges = self.pattern.GetSelection()
+            report["selection_count"] = ranges.Length if ranges else 0
+            if ranges and ranges.Length == 1:
+                live = ranges.GetElement(0)
+                report["live_after_abort"] = describe(live)
+                report["endpoint_comparison"] = [requested.CompareEndpoints(i, live, i) for i in (0, 1)]
+            composition = self.automation.pattern(self.element, "TextEditPattern")
+            if composition is not None:
+                active = composition.GetActiveComposition()
+                report["uia_composition"] = self.get_text(active) if active else None
+        except Exception as exc:
+            report["read_error"] = str(exc)
+        finally:
+            logger.debug("UIA選択失敗詳細: %r", report)
 
     def replace_positioned(self, state, start, end, result, expected_tick, caret):
         inserted = start + len(result)
@@ -513,47 +540,87 @@ class AutomationEditor:
             check_input_ready(self.window[1])
             if self.confirm_expected(state, focus_checked=True) != "match":
                 raise RuntimeError("置換直前に本文または選択位置が変わりました")
+        # Disable the IME before selecting the target. Some editors process the
+        # IME notification asynchronously and reset their selection when it
+        # arrives; sending any IME message after Select() makes the verified
+        # range stale. Disable() confirms the off state and drains that
+        # notification before the range is selected.
+        with stage("UIA/IME一時オフと状態確認"):
+            self.ime_session = self.ime_session_factory(self.window)
+            self.ime_session.disable()
+            self.check_focus()
+            if self.get_text(self.pattern.DocumentRange) != state.text:
+                raise RuntimeError("IME切り替え中に本文が変わりました。文字は送信していません")
+            if input_tick() != before_tick:
+                raise RuntimeError("IME切り替え中に操作がありました。文字は送信していません")
+            logger.debug("UIA入力: IME一時オフ確認済み / 選択前に本文と操作状態を再確認")
+        # Build the range only after the IME is off and the target thread has
+        # processed its pending notification. A range built before that
+        # transition can still read the same text while its provider anchors
+        # are no longer the ones the editor will select.
         selected = self.range_for(state, start, end)
         if input_tick() != before_tick:
             raise RuntimeError("文字範囲の準備中に操作がありました")
         with stage("UIA/選択反映待ち"):
+            selection_started = time.perf_counter()
+            logger.debug("UIA選択要求: 範囲=%s:%s / 本文=%s文字 / 操作番号=%s",
+                         start, end, len(state.text), before_tick)
             selected.Select()
+            logger.debug("UIA選択要求: Select復帰 / %.3fms",
+                         (time.perf_counter() - selection_started) * 1000)
             deadline = time.monotonic() + self.timeout
             wanted = TextState(state.text, start, end)
+            attempts, previous_status = 0, None
             while True:
-                if input_tick() != before_tick:
+                current_tick = input_tick()
+                if current_tick != before_tick:
+                    logger.debug("UIA選択中止: 操作番号=%s→%s", before_tick, current_tick)
+                    self.log_selection_failure("input_changed", state, start, end, selected)
                     raise RuntimeError("選択の反映待ちに操作があったため中止しました")
                 # Different provider anchors can represent the same textual
                 # boundary. Verify freshly read text and offsets, rather than
                 # equating raw range endpoints from separate COM objects.
                 actual = self.confirm_expected(wanted)
+                attempts += 1
+                if actual != previous_status:
+                    logger.debug("UIA選択観測: %s / 確認=%s回 / Select開始から%.3fms",
+                                 actual, attempts, (time.perf_counter() - selection_started) * 1000)
+                    previous_status = actual
                 if actual == "match":
                     break
                 if actual == "text_changed":
+                    self.log_selection_failure("text_changed", state, start, end, selected)
                     raise RuntimeError("選択の反映待ちに本文が変更されました")
                 if time.monotonic() >= deadline:
                     observed = self.read()
+                    logger.debug("UIA選択待ち終了: 確認=%s回 / 実際=%s:%s",
+                                 attempts, observed.start, observed.end)
+                    self.log_selection_failure("selection_timeout", state, start, end, selected)
                     raise RuntimeError(f"UIAの選択が反映されませんでした（要求{start}:{end}、実際{observed.start}:{observed.end}）。文字は送信していません")
-                poll_sleep(0.01)
+                # confirm_expected is itself a UIA round trip. Do not add a
+                # fixed 10 ms sleep on top of it; yield only briefly so a
+                # provider that applies the selection asynchronously can catch
+                # up without stalling the common case.
+                poll_sleep(0.001)
         with stage("UIA/送信前確認"):
-            self.check_focus()
-            if self.get_text(self.pattern.DocumentRange) != state.text:
-                raise RuntimeError("入力前に本文が変わりました")
+            # This UIA check also re-reads the full document and verifies the
+            # selection; no separate text read is needed before it.
             check_input_ready(self.window[1])
-            self.check_focus()
             if input_tick() != before_tick:
                 raise RuntimeError("入力直前に操作がありました")
+            # No IME message follows; this is a final UIA read to catch a
+            # delayed selection reset immediately before SendInput.
+            final_status = self.confirm_expected(wanted)
+            logger.debug("UIA送信直前観測: %s / Select開始から%.3fms", final_status,
+                         (time.perf_counter() - selection_started) * 1000)
+            if final_status != "match":
+                self.log_selection_failure("before_send", state, start, end, selected)
+                raise RuntimeError("入力直前に選択位置が変わりました。文字は送信していません")
         logger.debug("UIA入力: 選択確認済み=%s:%s / 送信文字数=%s / イベント数=%s",
                      start, end, len(result), len(events))
-        # Keep disabled until the engine has verified text/caret. SendInput
-        # returning does not mean the application's input queue is drained.
-        with stage("UIA/IME状態取得と一時オフ"):
-            self.ime_session = self.ime_session_factory(self.window)
-            self.ime_session.disable()
-        with stage("UIA/IME変更後の再確認"):
-            # read() checks focus both before and after the full snapshot.
-            if self.confirm_expected(wanted) != "match" or input_tick() != before_tick:
-                raise RuntimeError("IME切り替え中に本文・選択または操作状態が変わりました。文字は送信していません")
+        # No IME message after the range was selected. Keep the IME disabled
+        # until the engine has verified text/caret; SendInput returning does not
+        # mean the application's input queue is drained.
         with stage("UIA/SendInput送信"):
             send(events)  # never delete first or retry partial input
         logger.debug("UIA入力: SendInput送信済み。本文とカーソルの反映確認へ進みます")

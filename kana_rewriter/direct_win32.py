@@ -80,7 +80,10 @@ def wait_input_release(target, trigger_keys=()):
             return
         if time.monotonic() >= deadline:
             raise RuntimeError("ショートカットキーを離してください")
-        poll_sleep(0.005)
+        # The key release itself is user-controlled. Poll at the timer's
+        # high-resolution granularity so the release edge is not rounded up to
+        # the next 5 ms tick.
+        poll_sleep(0.001)
 
 
 def unicode_events(text):
