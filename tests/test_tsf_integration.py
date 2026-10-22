@@ -12,6 +12,18 @@ from tests.test_auto_ime import FIELD, commit_events
 
 
 class IntegrationSettingsTests(unittest.TestCase):
+    def test_paragraph_start_commit_matches_without_offset_guessing(self):
+        from kana_rewriter.editor import TextState, make_capture
+        for separator in ('\n', '\r\n', '\r', '\u2029'):
+            for prefix in ('前の行', '😀前の行'):
+                with self.subTest(separator=repr(separator), prefix=prefix):
+                    left = prefix + separator
+                    text = left + 'さんぽ'
+                    captured = make_capture(TextState(text, len(text), len(text)),
+                                            None, 'commit', Config(), 1, 'さんぽ')
+                    self.assertEqual(captured.source, 'さんぽ')
+                    self.assertEqual(captured.region.left, left)
+
     def test_cli_overrides_config_backend_for_normal_startup(self):
         from kana_rewriter.__main__ import main
         with patch('sys.argv', ['kana_rewriter', '--config', 'config.toml', '--ime-commit-backend', 'tsf']), \

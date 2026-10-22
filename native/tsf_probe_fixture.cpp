@@ -121,14 +121,44 @@ public:
     ULONG STDMETHODCALLTYPE Release() override { auto n=--refs; if (!n) delete this; return n; }
     HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
-        if (operation=="reset") {
+        if (operation=="noop") return S_OK;
+        if (operation=="reselect" || operation=="movecaret" || operation=="moveleft" ||
+            operation=="reverse" || operation=="sametext") {
+            TF_SELECTION selection{}; ULONG count=0;
+            HRESULT hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
+            if (FAILED(hr) || !count) return E_FAIL;
+            ComPtr<ITfRange> range; range.Attach(selection.range);
+            if (operation=="sametext") return range->SetText(cookie,0,L"さんぽ",3);
+            if (operation=="movecaret") {
+                hr=range->Collapse(cookie,TF_ANCHOR_START);
+                if (FAILED(hr)) return hr;
+            }
+            if (operation=="moveleft") {
+                LONG shifted=0;
+                hr=range->ShiftStart(cookie,-1,&shifted,nullptr);
+                if (SUCCEEDED(hr)) hr=range->Collapse(cookie,TF_ANCHOR_START);
+                if (FAILED(hr) || shifted!=-1) return E_FAIL;
+            }
+            if (operation=="reverse") selection.style.ase=TF_AE_START;
+            return context->SetSelection(cookie,1,&selection);
+        }
+        if (operation=="reset" || operation=="paragraph" || operation=="paragraph2" || operation=="blankline") {
             if (*composition) return E_UNEXPECTED;
             ComPtr<ITfRange> range,end;
             HRESULT hr=context->GetStart(cookie,&range);
             if (SUCCEEDED(hr)) hr=context->GetEnd(cookie,&end);
             if (SUCCEEDED(hr)) hr=range->ShiftEndToRange(cookie,end.Get(),TF_ANCHOR_END);
-            if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,L"さんぽ",3);
+            std::wstring text=operation=="paragraph"?L"前の行\rさんぽ":
+                operation=="paragraph2"?L"前の行\r散歩さんぽ":
+                operation=="blankline"?L"前の行\r\rさんぽ":L"さんぽ";
+            if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,text.c_str(),static_cast<LONG>(text.size()));
             if (FAILED(hr)) return hr;
+            if (operation!="reset") {
+                hr=range->Collapse(cookie,TF_ANCHOR_END);
+                LONG shifted=0;
+                if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-3,&shifted,nullptr);
+                if (FAILED(hr) || shifted!=-3) return E_FAIL;
+            }
             TF_SELECTION selected{range.Get(),{TF_AE_END,FALSE}};
             return context->SetSelection(cookie,1,&selected);
         }
@@ -151,7 +181,13 @@ public:
             hr=range->SetText(cookie,0,L"",0);
             if (FAILED(hr)) return hr;
         }
-        hr=(*composition)->EndComposition(cookie); composition->Reset(); return hr;
+        hr=(*composition)->EndComposition(cookie); composition->Reset();
+        if (SUCCEEDED(hr) && operation=="commitcaret") {
+            hr=range->Collapse(cookie,TF_ANCHOR_END);
+            TF_SELECTION selection{range.Get(),{TF_AE_END,FALSE}};
+            if (SUCCEEDED(hr)) hr=context->SetSelection(cookie,1,&selection);
+        }
+        return hr;
     }
 };
 

@@ -76,10 +76,36 @@ public:
     bool client_active=false;
     HANDLE edit_done=nullptr;
     ComPtr<ITfRange> committed;
+    ComPtr<ITfRange> committed_selection;
+    TF_SELECTIONSTYLE committed_style{};
     HWND committed_focus=nullptr;
     ULONGLONG commit_id=0, edit_revision=0;
     bool applying=false;
-    void invalidate_edit() { committed.Reset(); ++edit_revision; }
+    void invalidate_edit() { committed.Reset(); committed_selection.Reset(); ++edit_revision; }
+    bool unchanged_commit(TfEditCookie cookie,ITfEditRecord* record) {
+        if (!committed || !committed_selection || !record) return false;
+        // OnEndEdit also reports a repeated SetSelection or property update.
+        // Preserve only records with no text/composition changes and an
+        // unchanged real selection. API failures remain invalidating.
+        const GUID* properties[]={&composing_guid};
+        ComPtr<IEnumTfRanges> updates;
+        HRESULT hr=record->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT,properties,1,&updates);
+        if (FAILED(hr) || !updates) return false;
+        ComPtr<ITfRange> changed;
+        if (updates->Next(1,&changed,nullptr)!=S_FALSE) return false;
+        BOOL selection_changed=TRUE;
+        if (FAILED(record->GetSelectionStatus(&selection_changed))) return false;
+        if (!selection_changed) return true;
+        TF_SELECTION selection{}; ULONG count=0;
+        hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
+        ComPtr<ITfRange> selected; selected.Attach(selection.range);
+        if (FAILED(hr) || count!=1 || !selected ||
+            selection.style.ase!=committed_style.ase ||
+            selection.style.fInterimChar!=committed_style.fInterimChar) return false;
+        LONG start=1,end=1;
+        return SUCCEEDED(selected->CompareStart(cookie,committed_selection.Get(),TF_ANCHOR_START,&start)) &&
+            SUCCEEDED(selected->CompareEnd(cookie,committed_selection.Get(),TF_ANCHOR_END,&end)) && !start && !end;
+    }
     HRESULT request_edit();
     struct Range {
         ComPtr<IUnknown> identity;
@@ -222,10 +248,10 @@ public:
         emit(Key); return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnKeyTraceUp(WPARAM,LPARAM) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnEndEdit(ITfContext* edited,TfEditCookie cookie,ITfEditRecord*) override {
+    HRESULT STDMETHODCALLTYPE OnEndEdit(ITfContext* edited,TfEditCookie cookie,ITfEditRecord* record) override {
         if (stopping() || edited!=context.Get()) return S_OK;
         if (applying) return S_OK;
-        invalidate_edit();
+        if (!unchanged_commit(cookie,record)) invalidate_edit();
         ++busy;
         try { read_edit(edited,cookie); } catch (...) { previous.clear(); emit(Error,E_FAIL); }
         --busy; return S_OK;
@@ -273,6 +299,14 @@ public:
             // requires an observed Enter and a matching live editor snapshot.
             hr=old.range->Clone(&this->committed);
             if (FAILED(hr)) { emit(Error,hr); continue; }
+            TF_SELECTION selection{}; ULONG selected_count=0;
+            hr=edited->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&selected_count);
+            ComPtr<ITfRange> selected; selected.Attach(selection.range);
+            if (SUCCEEDED(hr) && selected_count==1 && selected)
+                hr=selected->Clone(&committed_selection);
+            else if (SUCCEEDED(hr)) hr=E_FAIL;
+            if (FAILED(hr)) { invalidate_edit(); emit(Error,hr); continue; }
+            committed_style=selection.style;
             committed_focus=GetFocus();
             ++commit_id;
             emit(Candidate,S_OK,std::wstring(buffer,count),0,old.started);

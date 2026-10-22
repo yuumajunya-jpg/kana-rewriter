@@ -63,6 +63,21 @@ class StateTests(unittest.TestCase):
         self.state = CommitState()
         self.state.track(FIELD)
 
+    def test_field_runtime_change_logs_identity_without_relaxing_safety(self):
+        changed = Focus(FIELD.target, (99,), FIELD.tid)
+        with self.assertLogs('kana_rewriter.auto_ime', level='DEBUG') as logs:
+            self.state.track(changed, 110)
+        self.assertIn('TSF入力先変更:', '\n'.join(logs.output))
+        self.assertEqual(self.state.accept_since, 110)
+        self.assertEqual(self.state.focus, changed)
+
+    def test_commit_before_focus_acceptance_logs_actual_rejection(self):
+        self.state.track(Focus(FIELD.target, (99,), FIELD.tid), 110)
+        with self.assertLogs('kana_rewriter.auto_ime', level='DEBUG') as logs:
+            self.state.observe([event(4, tick=120, composition_tick=100)], 120)
+        self.assertIn('TSF確定破棄: 確定開始が受付期間外', '\n'.join(logs.output))
+        self.assertIsNone(self.state.take(120))
+
     def test_commit_delivered_once_and_uncommitted_idle_does_not_trigger(self):
         self.state.observe(commit_events()[:-1], 100)
         self.assertIsNone(self.state.take(500))

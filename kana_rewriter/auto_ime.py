@@ -72,6 +72,8 @@ class CommitState:
                 self.accept_since = now
             self.focus_failed_since = None
             if focus != self.focus:
+                logger.debug("TSF入力先変更: old=%r / new=%r / tick=%s / pending=%s / busy=%s",
+                             self.focus, focus, now, self.pending is not None, self.busy)
                 self.focus = focus
                 self.revision += 1
                 self.pending = None
@@ -115,6 +117,8 @@ class CommitState:
                     continue
                 valid, reason = eligible(event, now, self.focus.target)
                 if event["kind"] == 4:
+                    logger.debug("TSF確定範囲: text=%r / commit_id=%s / native_revision=%s / focus=%r",
+                                 event["text"], event.get('commit_id'), event.get('revision'), self.focus)
                     logger.debug("TSF確定判定: eligible=%s reason=%s / now=%s tick=%s "
                                  "composition_tick=%s accept_since=%s / revision=%s",
                                  valid, reason, now, event["tick"], event["composition_tick"],
@@ -124,6 +128,10 @@ class CommitState:
                     native_range = ((event['commit_id'], event['revision'], event['text'])
                                     if 'commit_id' in event and 'revision' in event else None)
                     self.pending = Commit(text, self.focus, event["tick"], self.revision, native_range)
+                elif valid:
+                    logger.debug("TSF確定破棄: 確定開始が受付期間外 / composition_tick=%s "
+                                 "accept_since=%s commit_tick=%s / focus=%r",
+                                 event["composition_tick"], self.accept_since, event["tick"], self.focus)
                 elif event["kind"] == 4 and reason == "ctrl_confirm":
                     logger.debug("TSF自動変換: Ctrl+Enterのため置換しません")
 
@@ -333,7 +341,10 @@ class AutoImeMonitor:
                     # Same GUI thread: retain its subscription, discard the old
                     # field's queued notices and keep the new UIA identity.
                     if probe is not None:
-                        probe.drain()
+                        discarded = probe.drain()
+                        logger.debug("TSF入力先変更時の通知破棄: old=%r / new=%r / events=%s",
+                                     field, current, [(e['kind'], e['tick'], e['composition_tick'],
+                                                       len(e['text'])) for e in discarded])
                     field = current
                 now = self.reader.now()
                 if field is not None and probe is None and (field != rejected or now >= retry_at):

@@ -12,6 +12,7 @@
 | [Obsidianの箇条書き選択](OBSIDIAN_LIST_SELECTION.md) | UIA選択方式への復元、以前の変更・試験の経緯と制限 |
 | [ObsidianのIME確定後の根本原因](OBSIDIAN_IME_ROOT_CAUSE.md) | DOM・CodeMirror・UIAログから特定した選択解除の実行順競合 |
 | [TSF直接編集の検証と統合](TSF_DIRECT_EDIT_TRIAL.md) | 確定範囲の直接置換、合成アプリ・実機での検証と通常起動への統合 |
+| [改行後の先頭のTSF調査](PARAGRAPH_START_TSF.md) | 同じ選択の再通知による誤中止の再現・修正、入力欄識別の残る候補 |
 | [Python編集処理の比較](../PYTHON_EDITOR_COMPARISON.md) | 現行版の最適化・AIなし比較・手動試行 |
 | [モデル資料](../MODELS.md) | 調査時点の候補・固定GGUF・入力形式 |
 | [変換後の修正モデル](POST_CONVERSION_MODELS.md) | タイポ・誤変換・文法の専用モデル／検出器／小型LLM、導入・評価案（2026-10-13、実推論未検証） |
