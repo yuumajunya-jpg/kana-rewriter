@@ -215,7 +215,8 @@ def run_windows(converter, config, debug=False, timings=False):
                         from .auto_ime import capture_commit
                         started = time.perf_counter()
                         prepared = tsf_editor.prepare(commit) if tsf_editor is not None else None
-                        captured = (desktop.capture_commit(commit.text, commit.focus.target, commit.focus.runtime)
+                        captured = (tsf_editor.capture(prepared, config.context_chars,
+                                                       config.model_format not in {'jinen_v1', 'jinen_v2'})
                                     if prepared is not None else capture_commit(desktop, auto_monitor, commit))
                         capture_seconds = time.perf_counter() - started
                         if not auto_monitor.valid(commit):
@@ -228,6 +229,9 @@ def run_windows(converter, config, debug=False, timings=False):
                         auto_monitor.finish()
                         flush_logs()
                         print(f"自動変換を中止: {exc}", flush=True)
+                        from .tsf_edit import RestartRequired
+                        if isinstance(exc, RestartRequired):
+                            return 1
             if pending is not None and pending[0].done():
                 future, captured, started, capture_seconds, japanese_trigger, auto_commit, prepared = pending
                 pending = None

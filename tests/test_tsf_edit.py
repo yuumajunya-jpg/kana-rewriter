@@ -50,13 +50,12 @@ class NativeEditTests(unittest.TestCase):
             finally:
                 self.assertTrue(probe.close())
 
-    def test_internal_or_different_marker_insertions_do_not_write(self):
+    def test_source_changes_and_user_activity_do_not_write(self):
         with EditFixture() as fixture:
             probe = NativeEditProbe(fixture.tid).start()
             try:
                 self.events(probe, lambda es: any(e['kind']==2 for e in es))
-                for operation in ('insertmarkersinside','insertwrongmarkers','insertlettersbefore',
-                                  'insertmarkerslfinside','insertmarkersdoublelf','insertmarkerscr'):
+                for operation in ('insertmarkersinside','insertlettersbefore','insertmarkerslfinside'):
                     fixture.command('reported'); probe.drain()
                     fixture.command('begin'); fixture.command('commitcaret')
                     event=next(e for e in self.events(probe,lambda es:any(e['kind']==4 for e in es)) if e['kind']==4)
@@ -65,7 +64,7 @@ class NativeEditTests(unittest.TestCase):
                     self.assertFalse(reply['success'],reply)
                     self.assertFalse(reply['mutated'])
                 for operations in (('insertmarkers','begin'), ('moveleft','insertmarkers'),
-                                   ('differenttext','insertmarkers')):
+                                   ('insertmarkersinside','insertmarkers')):
                     fixture.command('reported'); probe.drain()
                     fixture.command('begin'); fixture.command('commitcaret')
                     event=next(e for e in self.events(probe,lambda es:any(e['kind']==4 for e in es)) if e['kind']==4)
@@ -76,6 +75,97 @@ class NativeEditTests(unittest.TestCase):
                     if operations[-1]=='begin': fixture.command('cancel')
             finally:
                 self.assertTrue(probe.close())
+
+    def test_arbitrary_boundary_insertions_preserve_text_and_context(self):
+        inserted = {'insertordinary':'続きの文章', 'insertordinarybeforecaret':'続きの文章',
+                    'insertemoji':'\U0001f642\u2060\n', 'insertwrongmarkers':'\u200c\u200b',
+                    'insertmarkersdoublelf':'\u200b\u200c\n\n', 'insertmarkerscr':'\u200b\u200c\r',
+                    'insertlong':'追'*1100}
+        with EditFixture() as fixture:
+            probe=NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                for setup in ('reportedfirst','reported'):
+                    prefix,suffix=('', '\n') if setup=='reportedfirst' else ('a'*9,'\r\n')
+                    for operation,addition in inserted.items():
+                        for repetition in range(25):
+                            with self.subTest(setup=setup,operation=operation,repetition=repetition):
+                                event=self.caret_candidate(fixture,probe,setup)
+                                self.assertEqual(probe.capture_context(event,64),(prefix,suffix))
+                                fixture.command(operation)
+                                reply=probe.replace(event,'へんかんてすと','変換テスト')
+                                self.assertTrue(reply['success'],reply)
+                                self.assertEqual(self.text(fixture),prefix+'変換テスト'+addition+suffix)
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_read_context_changes_reject_but_unreferenced_changes_continue(self):
+        with EditFixture() as fixture:
+            probe=NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                for operation in ('replaceprefix','insertprefix','replacesuffix','deletesuffix',
+                                  'replaceleftcontext','replacerightcontext'):
+                    for repetition in range(25):
+                        with self.subTest(operation=operation,repetition=repetition):
+                            event=self.caret_candidate(fixture,probe,'contextcase')
+                            self.assertEqual(probe.capture_context(event,3),('aaa','zzz'))
+                            fixture.command(operation)
+                            reply=probe.replace(event,'へんかんてすと','変換テスト')
+                            expected_success=operation not in ('replaceleftcontext','replacerightcontext')
+                            self.assertEqual(reply['success'],expected_success,reply)
+                            self.assertEqual(reply['mutated'],expected_success)
+                            if not expected_success:
+                                self.assertEqual(reply['diagnostic']>>16,114)
+                            else:
+                                prefix='別'+'a'*(10 if operation=='insertprefix' else 9) if operation in ('replaceprefix','insertprefix') else 'a'*10
+                                suffix='z'*10
+                                if operation=='replacesuffix': suffix='z'*8+'別z'
+                                if operation=='deletesuffix': suffix='z'*9
+                                self.assertEqual(self.text(fixture),prefix+'変換テスト'+suffix)
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_native_context_handles_unicode_newlines_and_unused_right_side(self):
+        with EditFixture() as fixture:
+            probe=NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                for characters,expected in ((0,('','')),(1,('\r\n','\U0001f642')),
+                                            (2,('\U0001f642\r\n','\U0001f642\r\n'))):
+                    event=self.caret_candidate(fixture,probe,'unicodecontext')
+                    self.assertEqual(probe.capture_context(event,characters),expected)
+                    self.assertTrue(probe.replace(event,event['text'],'変換テスト')['success'])
+                event=self.caret_candidate(fixture,probe,'longcontext')
+                with self.assertRaises(ValueError): probe.capture_context(event,1001)
+                self.assertEqual(probe.capture_context(event,1000),('\U0001f642\r\n'*500,)*2)
+                self.assertTrue(probe.replace(event,event['text'],'変換テスト')['success'])
+                event=self.caret_candidate(fixture,probe,'contextcase')
+                self.assertEqual(probe.capture_context(event,3,include_right=False),('aaa',''))
+                fixture.command('replacerightcontext')
+                self.assertTrue(probe.replace(event,event['text'],'変換テスト')['success'])
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_source_change_cannot_be_restored_by_later_refresh(self):
+        with EditFixture() as fixture:
+            probe=NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                event=self.caret_candidate(fixture,probe,'reportedfirst')
+                probe.capture_context(event,64)
+                fixture.command('insertmarkersinside')
+                fixture.command('refreshdocument')
+                reply=probe.replace(event,event['text'],'書かない')
+                self.assertFalse(reply['success'],reply)
+                self.assertFalse(reply['mutated'])
+            finally:
+                self.assertTrue(probe.close())
+
+    def caret_candidate(self,fixture,probe,setup):
+        fixture.command(setup); probe.drain()
+        fixture.command('begin'); fixture.command('commitcaret')
+        return next(e for e in self.events(probe,lambda es:any(e['kind']==4 for e in es)) if e['kind']==4)
 
     def test_identical_text_refresh_preserves_exact_range_and_selection(self):
         setups = {'reset': '', 'paragraph': '前の行\r',
@@ -101,45 +191,34 @@ class NativeEditTests(unittest.TestCase):
 
     def test_real_source_or_context_change_still_invalidates(self):
         with EditFixture() as fixture:
-            probe = NativeEditProbe(fixture.tid).start()
+            probe=NativeEditProbe(fixture.tid).start()
             try:
-                self.events(probe, lambda es: any(e['kind'] == 2 for e in es))
-                for operation in ('differenttext', 'changecontext'):
-                    fixture.command('paragraph'); probe.drain()
-                    fixture.command('begin'); fixture.command('commitcaret')
-                    event = next(e for e in self.events(probe, lambda es: any(e['kind'] == 4 for e in es))
-                                 if e['kind'] == 4)
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                for operation,reason in (('insertmarkersinside',109),('changecontext',114)):
+                    event=self.caret_candidate(fixture,probe,'paragraph')
+                    probe.capture_context(event,64)
                     fixture.command(operation)
-                    reply = probe.replace(event, 'さんぽ', '書かない')
-                    self.assertFalse(reply['success'], reply)
+                    reply=probe.replace(event,'さんぽ','書かない')
+                    self.assertFalse(reply['success'],reply)
                     self.assertFalse(reply['mutated'])
-                    self.assertEqual(reply['diagnostic'] >> 16, 109)
-                    self.assertEqual(reply['text_diff']['before'], 7)
-                    if operation == 'changecontext':
-                        self.assertEqual(reply['text_diff'], dict(before=7, after=7, prefix=0,
-                            suffix=6, source_equal=1, inserted_utf16='5225', original_units=3, original_start=4))
+                    self.assertEqual(reply['diagnostic']>>16,reason)
             finally:
                 self.assertTrue(probe.close())
 
-    def test_prefix_insertion_records_actual_units_without_writing(self):
+    def test_prefix_boundary_insertions_follow_retained_source(self):
         with EditFixture() as fixture:
-            probe = NativeEditProbe(fixture.tid).start()
+            probe=NativeEditProbe(fixture.tid).start()
             try:
-                self.events(probe, lambda es: any(e['kind'] == 2 for e in es))
-                for operation, units in (('insertlinebefore', '000d,000a'),
-                                         ('insertlettersbefore', '8ffd,52a0')):
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                for operation,inserted in (('insertlinebefore','\r\n'),('insertlettersbefore','追加')):
                     for repetition in range(25):
-                        with self.subTest(operation=operation, repetition=repetition):
-                            fixture.command('paragraph'); probe.drain()
-                            fixture.command('begin'); fixture.command('commitcaret')
-                            event = next(e for e in self.events(probe, lambda es: any(e['kind'] == 4 for e in es))
-                                         if e['kind'] == 4)
+                        with self.subTest(operation=operation,repetition=repetition):
+                            event=self.caret_candidate(fixture,probe,'paragraph')
+                            probe.capture_context(event,64)
                             fixture.command(operation)
-                            reply = probe.replace(event, 'さんぽ', '書かない')
-                            self.assertFalse(reply['success'])
-                            self.assertFalse(reply['mutated'])
-                            self.assertEqual(reply['text_diff'], dict(before=7, after=9, prefix=4,
-                                suffix=3, source_equal=1, inserted_utf16=units, original_units=3, original_start=4))
+                            reply=probe.replace(event,'さんぽ','散歩')
+                            self.assertTrue(reply['success'],reply)
+                            self.assertEqual(self.text(fixture),'前の行\r'+inserted+'散歩')
             finally:
                 self.assertTrue(probe.close())
 
@@ -261,8 +340,10 @@ class NativeEditTests(unittest.TestCase):
                 commit = Commit('さんぽ', Focus(target, (), fixture.tid), event['tick'], 1,
                                 (event['commit_id'], event['revision'], event['text']))
                 prepared = editor.prepare(commit)
+                captured = editor.capture(prepared,64)
+                self.assertEqual(captured.source,'さんぽ')
                 with patch('kana_rewriter.direct_win32.window_identity', return_value=target):
-                    self.assertTrue(editor.apply(prepared, SimpleNamespace(source='さんぽ'), '散歩'))
+                    self.assertTrue(editor.apply(prepared, captured, '散歩'))
                 self.assertEqual(self.text(fixture), '散歩')
             finally:
                 self.assertTrue(probe.close())
@@ -351,13 +432,37 @@ class NativeEditTests(unittest.TestCase):
                     event = self.candidate(fixture, probe)
                     replacement = ['散歩', '😀散歩', '散歩です。', ''][i % 4]
                     started = time.perf_counter()
+                    self.assertEqual(probe.capture_context(event,64),('',''))
                     result = probe.replace(event, 'さんぽ', replacement)
                     durations.append((time.perf_counter() - started) * 1000)
                     self.assertTrue(result['success'], (i, result))
                     self.assertEqual(self.text(fixture), replacement)
                 self.assertEqual(probe.dropped(), 0)
                 import statistics
-                print(f'TSF direct edit: 1000/1000, median={statistics.median(durations):.3f}ms, max={max(durations):.3f}ms')
+                print(f'TSF context + direct edit: 1000/1000, median={statistics.median(durations):.3f}ms, max={max(durations):.3f}ms')
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_capture_timeout_never_writes_and_refuses_reuse(self):
+        import subprocess
+        result=subprocess.run([sys.executable,'-X','utf8','-c',
+            'from tests.test_tsf_edit import NativeEditTests; NativeEditTests().assert_capture_timeout_case()'],
+            capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def assert_capture_timeout_case(self):
+        from kana_rewriter.tsf_edit import RestartRequired
+        with EditFixture() as fixture:
+            probe=NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe,lambda es:any(e['kind']==2 for e in es))
+                event=self.candidate(fixture,probe)
+                fixture.command('stall')
+                with self.assertRaises(RestartRequired):
+                    probe.capture_context(event,64,timeout_ms=1)
+                self.assertEqual(self.text(fixture),'さんぽ')
+                with self.assertRaises(OSError):
+                    probe.replace(event,'さんぽ','書かない')
             finally:
                 self.assertTrue(probe.close())
 
@@ -402,6 +507,16 @@ class NativeEditTests(unittest.TestCase):
 
 
 class TrialRoutingTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform=='win32','Windows DLL')
+    def test_old_edit_protocol_is_rejected_before_starting(self):
+        from unittest.mock import Mock,patch
+        dll=Mock()
+        dll.ProbeProtocolVersion.return_value=101
+        with patch('kana_rewriter.tsf_edit.C.WinDLL',return_value=dll), self.assertRaisesRegex(RuntimeError,'一緒に更新'):
+            NativeEditProbe(42,'old.dll')
+        dll.StartProbe.assert_not_called()
+        dll.PollProbe.assert_not_called()
+
     def test_unknown_write_stops_the_trial_and_closes_resources(self):
         from concurrent.futures import Future
         from types import SimpleNamespace
@@ -410,6 +525,7 @@ class TrialRoutingTests(unittest.TestCase):
         from kana_rewriter.tsf_edit_trial import run, RestartRequired
         event = dict(text='さんぽ', tick=12, commit_id=1, revision=2)
         probe = Mock(last_candidate=event)
+        probe.capture_context.return_value = ('', '')
         probe.replace.return_value = dict(success=False, hr=0x800705B4, mutated=True, state=5)
         focus = SimpleNamespace(target=(1, 2, 3), runtime=(4,))
         commit = SimpleNamespace(text='さんぽ', tick=12, focus=focus)

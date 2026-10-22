@@ -378,7 +378,7 @@ class WatcherTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")
 class NormalLoopTests(unittest.TestCase):
-    def run_loop(self, commit=True, valid=True, manual=False, backend='uia', failure=None):
+    def run_loop(self, commit=True, valid=True, manual=False, backend='uia', failure=None, capture_failure=None):
         from kana_rewriter.__main__ import run_windows
         from kana_rewriter import winapi as win
         calls = 0
@@ -415,10 +415,11 @@ class NormalLoopTests(unittest.TestCase):
             monitor.return_value.valid.side_effect = [True, valid]
             pool.return_value.submit.return_value = future
             desktop.return_value.capture_commit.return_value = 'capture'
+            tsf_editor.return_value.capture.side_effect = capture_failure
             tsf_editor.return_value.apply.return_value = True
             tsf_editor.return_value.apply.side_effect = failure
             from kana_rewriter.tsf_edit import RestartRequired
-            expected_code = 1 if isinstance(failure, RestartRequired) and backend == 'tsf' and not manual and valid else 0
+            expected_code = int(backend == 'tsf' and not manual and (isinstance(capture_failure,RestartRequired) or valid and isinstance(failure,RestartRequired)))
             self.assertEqual(run_windows(Mock(), Config(auto_replace_on_ime_commit=True, hotkey_line="F8",
                                                        hotkey_quit="Ctrl+Alt+Q", ime_commit_backend=backend)), expected_code)
             if manual:
@@ -428,10 +429,11 @@ class NormalLoopTests(unittest.TestCase):
                 tsf_editor.return_value.apply.assert_not_called()
             elif commit:
                 if backend == 'tsf':
-                    desktop.return_value.capture_commit.assert_called_once()
+                    desktop.return_value.capture_commit.assert_not_called()
+                    tsf_editor.return_value.capture.assert_called_once()
                     capture.assert_not_called()
                     apply.assert_not_called()
-                    self.assertEqual(tsf_editor.return_value.apply.call_count, int(valid))
+                    self.assertEqual(tsf_editor.return_value.apply.call_count, int(valid and capture_failure is None))
                 else:
                     capture.assert_called_once()
                     self.assertEqual(apply.call_count, int(valid))
@@ -445,6 +447,10 @@ class NormalLoopTests(unittest.TestCase):
     def test_tsf_inference_change_prevents_edit(self): self.run_loop(backend='tsf', valid=False)
     def test_tsf_manual_shortcut_retains_existing_backend(self): self.run_loop(backend='tsf', manual=True)
     def test_tsf_failure_does_not_fallback(self): self.run_loop(backend='tsf', failure=RuntimeError('rejected'))
+    def test_tsf_capture_timeout_exits_and_closes(self):
+        from kana_rewriter.tsf_edit import RestartRequired
+        self.run_loop(backend='tsf',capture_failure=RestartRequired('capture timeout'))
+
     def test_tsf_unknown_result_exits_and_closes(self):
         from kana_rewriter.tsf_edit import RestartRequired
         self.run_loop(backend='tsf', failure=RestartRequired('unknown'))

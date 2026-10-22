@@ -105,7 +105,7 @@ ime_commit_backend = "tsf"
 .\scripts\build_tsf_edit_probe.ps1
 ```
 
-`ime_commit_backend = "tsf"`では、確定時のTSF範囲に直接置換します。UIAは本文・文脈の読み取りに使い、選択・文字送信には使いません。
+`ime_commit_backend = "tsf"`では、確定時のTSF範囲に直接置換します。対象とAI用の文脈もTSFから取得します。変換中の範囲外の変更は文字種ではなく、保持範囲・参照文脈・選択との関係で検証します。詳細は[範囲検証の設計](docs/TSF_RANGE_VALIDATION.md)を参照してください。
 手動ショートカットは従来のWin32/UIA経路です。自動変換の失敗後にUIAへ切り替えたり、文字を再送したりしません。
 書き込み結果が不明になった場合は停止し、本文確認と再起動を求めます。
 

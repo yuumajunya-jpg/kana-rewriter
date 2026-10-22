@@ -125,7 +125,9 @@ public:
         if (operation=="insertmarkers" || operation=="insertmarkersbeforecaret" ||
             operation=="insertmarkersinside" || operation=="insertwrongmarkers" || operation=="removemarkers" ||
             operation=="insertmarkerslf" || operation=="insertmarkerslfbeforecaret" ||
-            operation=="insertmarkerslfinside" || operation=="insertmarkersdoublelf" || operation=="insertmarkerscr") {
+            operation=="insertmarkerslfinside" || operation=="insertmarkersdoublelf" || operation=="insertmarkerscr" ||
+            operation=="insertordinary" || operation=="insertemoji" || operation=="insertlong" ||
+            operation=="insertordinarybeforecaret") {
             TF_SELECTION selection{}; ULONG count=0;
             HRESULT hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
             ComPtr<ITfRange> range; range.Attach(selection.range);
@@ -151,12 +153,35 @@ public:
             if (operation=="insertmarkerslf" || operation=="insertmarkerslfbeforecaret" || operation=="insertmarkerslfinside") text=L"\x200b\x200c\n";
             if (operation=="insertmarkersdoublelf") text=L"\x200b\x200c\n\n";
             if (operation=="insertmarkerscr") text=L"\x200b\x200c\r";
+            std::wstring long_text(1100,L'追');
+            if (operation=="insertordinary" || operation=="insertordinarybeforecaret") text=L"続きの文章";
+            if (operation=="insertemoji") text=L"\U0001f642\u2060\n";
+            if (operation=="insertlong") text=long_text.c_str();
             if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,text,static_cast<LONG>(wcslen(text)));
-            if (operation=="insertmarkersbeforecaret" || operation=="insertmarkerslfbeforecaret") {
+            if (operation=="insertmarkersbeforecaret" || operation=="insertmarkerslfbeforecaret" || operation=="insertordinarybeforecaret") {
                 TF_SELECTION selected{caret.Get(),{TF_AE_END,FALSE}};
                 if (SUCCEEDED(hr)) hr=context->SetSelection(cookie,1,&selected);
             }
             return hr;
+        }
+        if (operation=="replaceprefix" || operation=="insertprefix" || operation=="replaceleftcontext" ||
+            operation=="replacerightcontext" || operation=="replacesuffix" || operation=="deletesuffix") {
+            TF_SELECTION selection{}; ULONG count=0;
+            HRESULT hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
+            ComPtr<ITfRange> caret; caret.Attach(selection.range);
+            if (FAILED(hr) || count!=1 || !caret) return E_FAIL;
+            ComPtr<ITfRange> range;
+            LONG offset=operation=="replaceleftcontext"?8:operation=="replacerightcontext"?18:
+                        (operation=="replacesuffix" || operation=="deletesuffix")?25:0;
+            hr=context->GetStart(cookie,&range);
+            LONG shifted=0;
+            if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,offset,&shifted,nullptr);
+            if (FAILED(hr) || shifted!=offset) return E_FAIL;
+            hr=range->Collapse(cookie,TF_ANCHOR_START);
+            if (operation!="insertprefix" && SUCCEEDED(hr)) hr=range->ShiftEnd(cookie,1,&shifted,nullptr);
+            if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,L"別",operation=="deletesuffix"?0:1);
+            TF_SELECTION selected{caret.Get(),{TF_AE_END,FALSE}};
+            return SUCCEEDED(hr)?context->SetSelection(cookie,1,&selected):hr;
         }
         if (operation=="insertlinebefore" || operation=="insertlettersbefore") {
             ComPtr<ITfRange> range;
@@ -233,7 +258,7 @@ public:
             if (operation=="reverse") selection.style.ase=TF_AE_START;
             return context->SetSelection(cookie,1,&selection);
         }
-        if (operation=="reset" || operation=="paragraph" || operation=="paragraph2" || operation=="blankline" || operation=="reported" || operation=="reportedfirst") {
+        if (operation=="reset" || operation=="paragraph" || operation=="paragraph2" || operation=="blankline" || operation=="reported" || operation=="reportedfirst" || operation=="contextcase" || operation=="unicodecontext" || operation=="longcontext") {
             if (*composition) return E_UNEXPECTED;
             ComPtr<ITfRange> range,end;
             HRESULT hr=context->GetStart(cookie,&range);
@@ -243,17 +268,21 @@ public:
                 operation=="paragraph2"?L"前の行\r散歩さんぽ":
                 operation=="blankline"?L"前の行\r\rさんぽ":
                 operation=="reported"?std::wstring(9,L'a')+L"へんかんてすと\r\n":
-                operation=="reportedfirst"?L"へんかんてすと\n":L"さんぽ";
+                operation=="reportedfirst"?L"へんかんてすと\n":
+                operation=="contextcase"?std::wstring(10,L'a')+L"へんかんてすと"+std::wstring(10,L'z'):
+                operation=="unicodecontext"?L"\U0001f642\r\nへんかんてすと\U0001f642\r\n":
+                operation=="longcontext"?[](){std::wstring p; for(int i=0;i<500;++i) p+=L"\U0001f642\r\n"; return p+L"へんかんてすと"+p;}():L"さんぽ";
             if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,text.c_str(),static_cast<LONG>(text.size()));
             if (FAILED(hr)) return hr;
             if (operation!="reset") {
                 hr=range->Collapse(cookie,TF_ANCHOR_END);
                 LONG shifted=0;
-                LONG width=operation=="reported"?9:operation=="reportedfirst"?8:3;
+                LONG width=operation=="reported"?9:operation=="reportedfirst"?8:
+                    operation=="contextcase"?17:operation=="unicodecontext"?11:operation=="longcontext"?2007:3;
                 if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-width,&shifted,nullptr);
                 if (FAILED(hr) || shifted!=-width) return E_FAIL;
-                if (operation=="reported" || operation=="reportedfirst") {
-                    LONG suffix=operation=="reportedfirst"?1:2;
+                if (operation=="reported" || operation=="reportedfirst" || operation=="contextcase" || operation=="unicodecontext" || operation=="longcontext") {
+                    LONG suffix=operation=="reportedfirst"?1:operation=="contextcase"?10:operation=="unicodecontext"?4:operation=="longcontext"?2000:2;
                     hr=range->ShiftEnd(cookie,-suffix,&shifted,nullptr);
                     if (FAILED(hr) || shifted!=-suffix) return E_FAIL;
                 }

@@ -9,7 +9,7 @@ import time
 from .auto_ime import AutoImeMonitor
 from .core import Config, Converter
 from .diagnostic_log import DiagnosticLog
-from .tsf_edit import NativeEditProbe, edit_probe_path, apply_commit, RestartRequired
+from .tsf_edit import NativeEditProbe, edit_probe_path, apply_commit, capture_commit_context, RestartRequired
 from .timing import flush_logs
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ def run(args):
         raise ValueError('TSF実験は直接編集用の設定を使用してください')
     config = replace(config, editor_worker='python')
     path = edit_probe_path()  # fail before loading AI or attaching
-    logger.debug('TSF編集実験DLL=%s / protocol=101', path)
+    logger.debug('TSF編集実験DLL=%s / protocol=102', path)
     if (args.fixed_source is None) != (args.fixed_result is None):
         raise ValueError('--fixed-sourceと--fixed-resultは両方指定してください')
     if args.fixed_source is not None and not args.fixed_source:
@@ -53,7 +53,7 @@ def run(args):
         monitor.start()
         print('TSF直接編集実験: Enter確定後の対象を直接置換 / 終了はこの端末でCtrl+C', flush=True)
         print('通常版の変換プログラムは同時に起動しないでください。', flush=True)
-        print('UIAは読み取り専用。UIA選択・キー送信・IME切り替え・フォールバックは行いません。', flush=True)
+        print('本文取得と置換はTSFを使用。UIA選択・キー送信・IME切り替え・フォールバックは行いません。', flush=True)
         while True:
             message = W.MSG()
             while user.PeekMessageW(C.byref(message), None, 0, 0, 1):
@@ -66,7 +66,8 @@ def run(args):
                         event = dict(probe.last_candidate or {})
                         if event.get('tick') != commit.tick or event.get('text', '').replace('\r\n', '\n').replace('\r', '\n') != commit.text:
                             raise RuntimeError('確定通知の識別が変わったため中止しました')
-                        captured = desktop.capture_commit(commit.text, commit.focus.target, commit.focus.runtime)
+                        captured = capture_commit_context(probe, event, config.context_chars,
+                                                          config.model_format not in {'jinen_v1', 'jinen_v2'})
                         if not monitor.valid(commit):
                             raise RuntimeError('本文取得中に入力先または入力状態が変わりました')
                         future = pool.submit(converter.convert_selection, captured.source,
@@ -75,6 +76,8 @@ def run(args):
                         pending = (future, commit, captured, probe, event)
                         logger.debug('TSF直接編集予定: commit=%s revision=%s / source=%r',
                                      event['commit_id'], event['revision'], captured.source)
+                    except RestartRequired:
+                        raise
                     except Exception as exc:
                         monitor.finish()
                         print('中止: ' + str(exc), flush=True)
