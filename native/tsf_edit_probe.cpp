@@ -13,6 +13,7 @@
 
 using Microsoft::WRL::ComPtr;
 constexpr unsigned capacity = 64, text_limit = 1024;
+constexpr unsigned document_limit = 200000;
 struct Packet {
     DWORD kind, pid, tid, hr, key, active, modifiers;
     ULONGLONG tick, hwnd, generation, composition_tick;
@@ -20,6 +21,7 @@ struct Packet {
     ULONGLONG commit_id, revision;
 };
 constexpr DWORD ModifierCtrl=1, ModifierAlt=2, ModifierShift=4, ModifierWin=8;
+struct TextDiff { DWORD before,after,prefix,suffix,source_equal; };
 struct Shared {
     volatile LONG write, read, dropped, stop, attached;
     ULONGLONG control_hwnd;
@@ -28,6 +30,7 @@ struct Shared {
     ULONGLONG request_id, commit_id, revision, deadline;
     DWORD result, mutated;
     DWORD diagnostic;
+    TextDiff text_diff;
     wchar_t expected[text_limit], replacement[text_limit];
 };
 enum Kind { Attached=1, Context=2, Editing=3, Candidate=4, EmptyEnd=5,
@@ -39,7 +42,8 @@ enum Diagnostic : DWORD { NoReason=0, Stopped=1, MissingRange=2, ContextChanged=
     KeyInvalidation=101, ContextInvalidation=102, EditInvalidation=103,
     SelectionInvalidation=104, StyleInvalidation=105, InspectionInvalidation=106,
     CompletedInvalidation=107, SnapshotInvalidation=108, TextInvalidation=109,
-    CompositionInvalidation=110, NewCompositionInvalidation=111, RangeTextInvalidation=112 };
+    CompositionInvalidation=110, NewCompositionInvalidation=111, RangeTextInvalidation=112,
+    DocumentSnapshotInvalidation=113 };
 const GUID composing_guid = {0xe12ac060,0xaf15,0x11d2,{0xaf,0xc5,0x00,0x10,0x5a,0x27,0x99,0xb5}};
 HINSTANCE module_handle;
 UINT control_message;
@@ -87,6 +91,9 @@ public:
     ComPtr<ITfRange> committed;
     ComPtr<ITfRange> committed_selection;
     std::wstring committed_text;
+    std::wstring committed_document;
+    bool document_snapshot_valid=false;
+    TextDiff last_text_diff{};
     TF_SELECTIONSTYLE committed_style{};
     HWND committed_focus=nullptr;
     ULONGLONG commit_id=0, edit_revision=0;
@@ -94,30 +101,65 @@ public:
     DWORD last_invalidation=NoReason;
     void invalidate_edit(DWORD reason=EditInvalidation) {
         committed.Reset(); committed_selection.Reset(); committed_text.clear();
+        committed_document.clear(); document_snapshot_valid=false;
         ++edit_revision; last_invalidation=reason;
+    }
+    bool read_document(TfEditCookie cookie,std::wstring& text) {
+        ComPtr<ITfRange> range,end;
+        HRESULT hr=context->GetStart(cookie,&range);
+        if (SUCCEEDED(hr)) hr=context->GetEnd(cookie,&end);
+        if (SUCCEEDED(hr)) hr=range->ShiftEndToRange(cookie,end.Get(),TF_ANCHOR_END);
+        if (FAILED(hr)) return false;
+        text.resize(document_limit+1);
+        ULONG count=0;
+        hr=range->GetText(cookie,TF_TF_MOVESTART,text.data(),document_limit+1,&count);
+        BOOL empty=FALSE;
+        if (FAILED(hr) || count>document_limit || FAILED(range->IsEmpty(cookie,&empty)) || !empty) {
+            text.clear(); return false;
+        }
+        text.resize(count); return true;
     }
     bool unchanged_commit(TfEditCookie cookie,ITfEditRecord* record) {
         if (!committed) return false;
         last_invalidation=InspectionInvalidation;
         if (!committed || !committed_selection || !record) return false;
         // OnEndEdit also reports a repeated SetSelection or property update.
-        // Real text updates invalidate. A composition-property refresh may
-        // follow commit delivery: verify its final state without recreating
-        // or retrying the original range. API failures remain invalidating.
+        // A notification alone does not prove a content change. Verify exact
+        // document equality for text notifications, then verify the original
+        // range and selection. Never recreate a range or replay a request.
         const GUID* properties[]={&composing_guid};
         ComPtr<IEnumTfRanges> updates;
         HRESULT hr=record->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT,nullptr,0,&updates);
         if (FAILED(hr) || !updates) return false;
         ComPtr<ITfRange> changed;
         HRESULT next=updates->Next(1,&changed,nullptr);
-        if (next!=S_FALSE) { if (SUCCEEDED(next)) last_invalidation=TextInvalidation; return false; }
+        if (next!=S_OK && next!=S_FALSE) return false;
+        bool text_updated=next==S_OK;
+        if (text_updated) {
+            if (!document_snapshot_valid) { last_invalidation=DocumentSnapshotInvalidation; return false; }
+            std::wstring document;
+            if (!read_document(cookie,document)) return false;
+            if (document!=committed_document) {
+                size_t prefix=0,suffix=0;
+                while (prefix<document.size() && prefix<committed_document.size() &&
+                       document[prefix]==committed_document[prefix]) ++prefix;
+                while (suffix<document.size()-prefix && suffix<committed_document.size()-prefix &&
+                       document[document.size()-1-suffix]==committed_document[committed_document.size()-1-suffix]) ++suffix;
+                wchar_t source[text_limit]{}; ULONG length=0;
+                HRESULT read_hr=committed->GetText(cookie,0,source,text_limit,&length);
+                last_text_diff={static_cast<DWORD>(committed_document.size()),static_cast<DWORD>(document.size()),
+                    static_cast<DWORD>(prefix),static_cast<DWORD>(suffix),
+                    FAILED(read_hr)?2u:std::wstring(source,length)==committed_text?1u:0u};
+                last_invalidation=TextInvalidation; return false;
+            }
+        }
         updates.Reset(); changed.Reset();
         hr=record->GetTextAndPropertyUpdates(0,properties,1,&updates);
         if (FAILED(hr) || !updates) return false;
         next=updates->Next(1,&changed,nullptr);
         if (next!=S_OK && next!=S_FALSE) return false;
         bool composition_updated=next==S_OK;
-        if (composition_updated) {
+        if (composition_updated || text_updated) {
             ComPtr<ITfContextComposition> service;
             ComPtr<IEnumITfCompositionView> compositions;
             ComPtr<ITfCompositionView> active;
@@ -145,7 +187,7 @@ public:
         }
         BOOL selection_changed=TRUE;
         if (FAILED(record->GetSelectionStatus(&selection_changed))) return false;
-        if (!selection_changed && !composition_updated) return true;
+        if (!selection_changed && !composition_updated && !text_updated) return true;
         TF_SELECTION selection{}; ULONG count=0;
         hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
         ComPtr<ITfRange> selected; selected.Attach(selection.range);
@@ -364,6 +406,8 @@ public:
             if (FAILED(hr)) { invalidate_edit(SnapshotInvalidation); emit(Error,hr); continue; }
             committed_style=selection.style;
             committed_text.assign(buffer,count);
+            document_snapshot_valid=read_document(cookie,committed_document);
+            last_text_diff={};
             committed_focus=GetFocus();
             ++commit_id;
             emit(Candidate,S_OK,std::wstring(buffer,count),0,old.started);
@@ -395,6 +439,7 @@ public:
     ULONG STDMETHODCALLTYPE Release() override { auto count=--refs; if (!count) delete this; return count; }
     HRESULT replace(TfEditCookie cookie) {
         auto reject=[&](DWORD reason,HRESULT hr=HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH)) {
+            owner->shared->text_diff=owner->last_invalidation==TextInvalidation?owner->last_text_diff:TextDiff{};
             owner->shared->diagnostic=reason|(owner->last_invalidation<<16); return hr;
         };
         if (owner->stopping()) return reject(Stopped);
@@ -563,6 +608,10 @@ struct EditResult { DWORD hr, mutated, state; };
 extern "C" __declspec(dllexport) DWORD WINAPI LastEditDiagnostic() {
     return host_shared?host_shared->diagnostic:0;
 }
+extern "C" __declspec(dllexport) BOOL WINAPI LastEditTextDiff(TextDiff* value) {
+    if (!host_shared || !value || !host_shared->text_diff.before) return FALSE;
+    *value=host_shared->text_diff; return TRUE;
+}
 extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULONGLONG revision,
         const wchar_t* expected,const wchar_t* replacement,DWORD timeout,EditResult* result) {
     if (!host_shared || host_poisoned || !expected || !replacement || !result || !timeout ||
@@ -577,6 +626,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULON
     host_shared->deadline=GetTickCount64()+timeout;
     wcscpy_s(host_shared->expected,text_limit,expected); wcscpy_s(host_shared->replacement,text_limit,replacement);
     host_shared->result=E_PENDING; host_shared->mutated=0; host_shared->diagnostic=0;
+    host_shared->text_diff={};
     MemoryBarrier(); InterlockedExchange(&host_shared->edit_state,1);
     if (!host_shared->control_hwnd || !PostMessageW(reinterpret_cast<HWND>(host_shared->control_hwnd),WM_APP+2,0,0)) {
         InterlockedExchange(&host_shared->edit_state,4); SetLastError(ERROR_NOT_READY); return FALSE;

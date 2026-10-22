@@ -22,6 +22,7 @@ DIAGNOSTICS = {
     107: 'previous_apply_completed', 108: 'selection_snapshot_failed',
     109: 'text_updated', 110: 'composition_attribute_active',
     111: 'new_composition', 112: 'range_text_changed',
+    113: 'document_snapshot_unavailable',
 }
 
 
@@ -38,6 +39,10 @@ class EditPacket(C.Structure):
 
 class EditResult(C.Structure):
     _fields_ = [("hr", W.DWORD), ("mutated", W.DWORD), ("state", W.DWORD)]
+
+
+class TextDiff(C.Structure):
+    _fields_ = [(name, W.DWORD) for name in ('before', 'after', 'prefix', 'suffix', 'source_equal')]
 
 
 def edit_probe_path():
@@ -72,6 +77,10 @@ class NativeEditProbe:
         self.last_diagnostic = getattr(self.dll, 'LastEditDiagnostic', None)
         if self.last_diagnostic is not None:
             self.last_diagnostic.restype = W.DWORD
+        self.last_text_diff = getattr(self.dll, 'LastEditTextDiff', None)
+        if self.last_text_diff is not None:
+            self.last_text_diff.argtypes = [C.POINTER(TextDiff)]
+            self.last_text_diff.restype = W.BOOL
         logger.debug('TSF編集DLL: path=%s / protocol=101 / detailed_diagnostics=%s',
                      path.resolve(), self.last_diagnostic is not None)
         self.tid, self.started = tid, False
@@ -113,9 +122,14 @@ class NativeEditProbe:
             if not self.dll.ReplaceCommit(candidate["commit_id"], candidate["revision"], expected,
                                           replacement, timeout_ms, C.byref(result)):
                 raise C.WinError(C.get_last_error())
+            diff = TextDiff()
+            text_diff = ({name: getattr(diff, name) for name, _ in TextDiff._fields_}
+                         if result.state == 3 and self.last_text_diff is not None
+                         and self.last_text_diff(C.byref(diff)) else None)
             return {"hr": result.hr, "mutated": bool(result.mutated), "state": result.state,
                     "success": result.hr == 0 and result.state == 3,
-                    "diagnostic": self.last_diagnostic() if self.last_diagnostic is not None and result.state == 3 else 0}
+                    "diagnostic": self.last_diagnostic() if self.last_diagnostic is not None and result.state == 3 else 0,
+                    "text_diff": text_diff}
 
     def close(self):
         with self.lock:
@@ -174,6 +188,12 @@ def apply_commit(probe, event, captured, result, target=None):
     # normalized text, while TSF must verify the original UTF-16 contents.
     reply = probe.replace(event, event['text'], result)
     reason = diagnostic_reason(reply.get('diagnostic', 0))
+    diff = reply.get('text_diff')
+    if diff:
+        reason += (f" / document_chars={diff['before']}->{diff['after']}"
+                   f" changed_span={diff['prefix']}:{diff['before'] - diff['suffix']}"
+                   f"->{diff['prefix']}:{diff['after'] - diff['suffix']}"
+                   f" source_equal={ {0: 'False', 1: 'True', 2: 'unknown'}.get(diff['source_equal'], 'unknown') }")
     logger.debug('TSF直接編集: commit=%s revision=%s / hr=0x%08x mutated=%s state=%s / %.3fms',
                  event['commit_id'], event['revision'], reply['hr'], reply['mutated'],
                  reply['state'], (time.perf_counter() - started) * 1000)

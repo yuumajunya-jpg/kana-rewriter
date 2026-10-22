@@ -12,6 +12,18 @@ from tests.test_auto_ime import FIELD, commit_events
 
 
 class IntegrationSettingsTests(unittest.TestCase):
+    def test_text_change_summary_is_included_in_abort_message(self):
+        from unittest.mock import Mock
+        from kana_rewriter.tsf_edit import apply_commit
+        probe = Mock()
+        probe.replace.return_value = dict(success=False, hr=0x8007051a, mutated=False,
+                                         state=3, diagnostic=(109 << 16) | 2,
+                                         text_diff=dict(before=7, after=8, prefix=0, suffix=7, source_equal=1))
+        with self.assertRaisesRegex(RuntimeError, 'document_chars=7->8 changed_span=0:0->0:1 source_equal=True'):
+            apply_commit(probe, dict(text='かな', commit_id=1, revision=2),
+                         SimpleNamespace(source='かな'), '仮名')
+        probe.replace.assert_called_once()
+
     def test_rejection_message_distinguishes_native_validation_and_invalidation(self):
         from unittest.mock import Mock
         from kana_rewriter.tsf_edit import apply_commit, diagnostic_reason

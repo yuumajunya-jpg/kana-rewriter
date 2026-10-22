@@ -137,11 +137,38 @@ public:
             return SUCCEEDED(hr)?temporary->EndComposition(cookie):hr;
         }
         if (operation=="reselect" || operation=="movecaret" || operation=="moveleft" ||
-            operation=="reverse" || operation=="sametext") {
+            operation=="reverse" || operation=="sametext" || operation=="differenttext" ||
+            operation=="refreshtext" || operation=="refreshdocument" || operation=="changecontext") {
             TF_SELECTION selection{}; ULONG count=0;
             HRESULT hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
             if (FAILED(hr) || !count) return E_FAIL;
             ComPtr<ITfRange> range; range.Attach(selection.range);
+            if (operation=="changecontext") {
+                ComPtr<ITfRange> first;
+                hr=context->GetStart(cookie,&first);
+                LONG shifted=0;
+                if (SUCCEEDED(hr)) hr=first->ShiftEnd(cookie,1,&shifted,nullptr);
+                return SUCCEEDED(hr)?first->SetText(cookie,0,L"別",1):hr;
+            }
+            if (operation=="refreshtext" || operation=="refreshdocument") {
+                ComPtr<ITfRange> first,last;
+                hr=context->GetStart(cookie,&first);
+                if (SUCCEEDED(hr)) hr=context->GetEnd(cookie,&last);
+                if (SUCCEEDED(hr)) hr=first->ShiftEndToRange(cookie,last.Get(),TF_ANCHOR_END);
+                if (operation=="refreshtext" && SUCCEEDED(hr)) {
+                    hr=first->Collapse(cookie,TF_ANCHOR_END);
+                    LONG shifted=0;
+                    if (SUCCEEDED(hr)) hr=first->ShiftStart(cookie,-3,&shifted,nullptr);
+                    if (SUCCEEDED(hr) && shifted!=-3) hr=E_FAIL;
+                }
+                wchar_t text[2048]{}; ULONG count=0;
+                if (SUCCEEDED(hr)) hr=first->GetText(cookie,0,text,2048,&count);
+                if (SUCCEEDED(hr)) hr=first->SetText(cookie,0,text,count);
+                if (SUCCEEDED(hr)) hr=first->Collapse(cookie,TF_ANCHOR_END);
+                TF_SELECTION selected{first.Get(),{TF_AE_END,FALSE}};
+                return SUCCEEDED(hr)?context->SetSelection(cookie,1,&selected):hr;
+            }
+            if (operation=="differenttext") return range->SetText(cookie,0,L"変更",2);
             if (operation=="sametext") return range->SetText(cookie,0,L"さんぽ",3);
             if (operation=="movecaret") {
                 hr=range->Collapse(cookie,TF_ANCHOR_START);
