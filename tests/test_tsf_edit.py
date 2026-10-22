@@ -19,11 +19,13 @@ class NativeEditTests(unittest.TestCase):
                   'paragraph': ('前の行\r', 'さんぽ', '散歩', ''),
                   'paragraph2': ('前の行\r散歩', 'さんぽ', '散歩', ''),
                   'blankline': ('前の行\r\r', 'さんぽ', '散歩', ''),
-                  'reported': ('a'*9, 'へんかんてすと', '変換テスト', '\r\n')}
+                  'reported': ('a'*9, 'へんかんてすと', '変換テスト', '\r\n'),
+                  'reportedfirst': ('', 'へんかんてすと', '変換テスト', '\n')}
         marker='\u200b\u200c'
         variants = (('insertmarkers',), ('insertmarkersbeforecaret',),
                     ('insertmarkers', 'removemarkers', 'insertmarkers'),
-                    ('insertmarkers', 'insertmarkers'))
+                    ('insertmarkers', 'insertmarkers'),
+                    ('insertmarkerslf',), ('insertmarkerslfbeforecaret',))
         with EditFixture() as fixture:
             probe = NativeEditProbe(fixture.tid).start()
             try:
@@ -43,7 +45,8 @@ class NativeEditTests(unittest.TestCase):
                                 reply=probe.replace(event,source,result)
                                 self.assertTrue(reply['success'],reply)
                                 count=2 if operations==('insertmarkers','insertmarkers') else 1
-                                self.assertEqual(self.text(fixture),prefix+result+marker*count+suffix)
+                                inserted=marker+'\n' if operations[0].startswith('insertmarkerslf') else marker*count
+                                self.assertEqual(self.text(fixture),prefix+result+inserted+suffix)
             finally:
                 self.assertTrue(probe.close())
 
@@ -52,7 +55,8 @@ class NativeEditTests(unittest.TestCase):
             probe = NativeEditProbe(fixture.tid).start()
             try:
                 self.events(probe, lambda es: any(e['kind']==2 for e in es))
-                for operation in ('insertmarkersinside','insertwrongmarkers','insertlettersbefore'):
+                for operation in ('insertmarkersinside','insertwrongmarkers','insertlettersbefore',
+                                  'insertmarkerslfinside','insertmarkersdoublelf','insertmarkerscr'):
                     fixture.command('reported'); probe.drain()
                     fixture.command('begin'); fixture.command('commitcaret')
                     event=next(e for e in self.events(probe,lambda es:any(e['kind']==4 for e in es)) if e['kind']==4)

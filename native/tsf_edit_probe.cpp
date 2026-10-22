@@ -178,22 +178,25 @@ public:
                 last_inserted_text=document.substr(prefix,std::min<size_t>(16,document.size()-prefix-suffix));
                 last_original_units=static_cast<DWORD>(committed_text.size());
                 last_original_start=source_bounds.valid?static_cast<DWORD>(source_bounds.start):MAXDWORD;
-                // Only the observed pair at the end of this exact composition
-                // is structural. Do not strip format characters globally.
+                // Preserve only the observed boundary marker forms; never
+                // strip format characters or accept arbitrary line changes.
                 if (bounded_anchors && source_bounds.valid && selection_bounds.valid) {
                     marker_position=source_bounds.start+source_bounds.length;
                     size_t position=static_cast<size_t>(marker_position);
-                    const std::wstring marker=L"\x200b\x200c";
-                    if (position<=committed_document.size() && document.size()==committed_document.size()+2 &&
-                        document.compare(0,position,committed_document,0,position)==0 &&
-                        document.compare(position,2,marker)==0 &&
-                        document.compare(position+2,std::wstring::npos,committed_document,position,std::wstring::npos)==0)
-                        marker_delta=2;
-                    else if (position+2<=committed_document.size() && document.size()+2==committed_document.size() &&
-                        committed_document.compare(position,2,marker)==0 &&
-                        document.compare(0,position,committed_document,0,position)==0 &&
-                        document.compare(position,std::wstring::npos,committed_document,position+2,std::wstring::npos)==0)
-                        marker_delta=-2;
+                    for (const wchar_t* marker : {L"\x200b\x200c",L"\x200b\x200c\n"}) {
+                        size_t units=wcslen(marker);
+                        if (position<=committed_document.size() && document.size()==committed_document.size()+units &&
+                            document.compare(0,position,committed_document,0,position)==0 &&
+                            document.compare(position,units,marker)==0 &&
+                            document.compare(position+units,std::wstring::npos,committed_document,position,std::wstring::npos)==0)
+                            marker_delta=static_cast<int>(units);
+                        else if (position+units<=committed_document.size() && document.size()+units==committed_document.size() &&
+                            committed_document.compare(position,units,marker)==0 &&
+                            document.compare(0,position,committed_document,0,position)==0 &&
+                            document.compare(position,std::wstring::npos,committed_document,position+units,std::wstring::npos)==0)
+                            marker_delta=-static_cast<int>(units);
+                        if (marker_delta) break;
+                    }
                 }
                 if (!marker_delta) { last_invalidation=TextInvalidation; return false; }
                 updated_document=std::move(document);
@@ -249,8 +252,8 @@ public:
                 actual_source.length!=source_bounds.length) { last_invalidation=RangeTextInvalidation; return false; }
             auto same_point=[&](LONG before,LONG after) {
                 if (before<marker_position) return before==after;
-                if (before==marker_position) return after==before || (marker_delta>0 && after==before+2);
-                if (marker_delta<0 && before<marker_position+2) return false;
+                if (before==marker_position) return after==before || (marker_delta>0 && after==before+marker_delta);
+                if (marker_delta<0 && before<marker_position-marker_delta) return false;
                 return after==before+marker_delta;
             };
             if (!same_point(selection_bounds.start,actual_selection.start) ||
