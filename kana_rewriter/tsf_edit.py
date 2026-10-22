@@ -20,6 +20,8 @@ DIAGNOSTICS = {
     101: 'key', 102: 'context', 103: 'text_or_composition_update',
     104: 'selection_moved', 105: 'selection_style_changed', 106: 'inspection_failed',
     107: 'previous_apply_completed', 108: 'selection_snapshot_failed',
+    109: 'text_updated', 110: 'composition_attribute_active',
+    111: 'new_composition', 112: 'range_text_changed',
 }
 
 

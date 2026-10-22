@@ -38,7 +38,8 @@ enum Diagnostic : DWORD { NoReason=0, Stopped=1, MissingRange=2, ContextChanged=
     ForegroundChanged=8, ActiveComposition=9, TextMismatch=10,
     KeyInvalidation=101, ContextInvalidation=102, EditInvalidation=103,
     SelectionInvalidation=104, StyleInvalidation=105, InspectionInvalidation=106,
-    CompletedInvalidation=107, SnapshotInvalidation=108 };
+    CompletedInvalidation=107, SnapshotInvalidation=108, TextInvalidation=109,
+    CompositionInvalidation=110, NewCompositionInvalidation=111, RangeTextInvalidation=112 };
 const GUID composing_guid = {0xe12ac060,0xaf15,0x11d2,{0xaf,0xc5,0x00,0x10,0x5a,0x27,0x99,0xb5}};
 HINSTANCE module_handle;
 UINT control_message;
@@ -85,31 +86,66 @@ public:
     HANDLE edit_done=nullptr;
     ComPtr<ITfRange> committed;
     ComPtr<ITfRange> committed_selection;
+    std::wstring committed_text;
     TF_SELECTIONSTYLE committed_style{};
     HWND committed_focus=nullptr;
     ULONGLONG commit_id=0, edit_revision=0;
     bool applying=false;
     DWORD last_invalidation=NoReason;
     void invalidate_edit(DWORD reason=EditInvalidation) {
-        committed.Reset(); committed_selection.Reset(); ++edit_revision; last_invalidation=reason;
+        committed.Reset(); committed_selection.Reset(); committed_text.clear();
+        ++edit_revision; last_invalidation=reason;
     }
     bool unchanged_commit(TfEditCookie cookie,ITfEditRecord* record) {
         if (!committed) return false;
         last_invalidation=InspectionInvalidation;
         if (!committed || !committed_selection || !record) return false;
         // OnEndEdit also reports a repeated SetSelection or property update.
-        // Preserve only records with no text/composition changes and an
-        // unchanged real selection. API failures remain invalidating.
+        // Real text updates invalidate. A composition-property refresh may
+        // follow commit delivery: verify its final state without recreating
+        // or retrying the original range. API failures remain invalidating.
         const GUID* properties[]={&composing_guid};
         ComPtr<IEnumTfRanges> updates;
-        HRESULT hr=record->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT,properties,1,&updates);
+        HRESULT hr=record->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT,nullptr,0,&updates);
         if (FAILED(hr) || !updates) return false;
         ComPtr<ITfRange> changed;
         HRESULT next=updates->Next(1,&changed,nullptr);
-        if (next!=S_FALSE) { if (SUCCEEDED(next)) last_invalidation=EditInvalidation; return false; }
+        if (next!=S_FALSE) { if (SUCCEEDED(next)) last_invalidation=TextInvalidation; return false; }
+        updates.Reset(); changed.Reset();
+        hr=record->GetTextAndPropertyUpdates(0,properties,1,&updates);
+        if (FAILED(hr) || !updates) return false;
+        next=updates->Next(1,&changed,nullptr);
+        if (next!=S_OK && next!=S_FALSE) return false;
+        bool composition_updated=next==S_OK;
+        if (composition_updated) {
+            ComPtr<ITfContextComposition> service;
+            ComPtr<IEnumITfCompositionView> compositions;
+            ComPtr<ITfCompositionView> active;
+            hr=context.As(&service);
+            if (SUCCEEDED(hr)) hr=service->EnumCompositions(&compositions);
+            if (FAILED(hr)) return false;
+            hr=compositions->Next(1,&active,nullptr);
+            if (hr!=S_FALSE) {
+                if (SUCCEEDED(hr)) last_invalidation=NewCompositionInvalidation;
+                return false;
+            }
+            wchar_t text[text_limit]{}; ULONG length=0;
+            if (FAILED(committed->GetText(cookie,0,text,text_limit,&length))) return false;
+            if (std::wstring(text,length)!=committed_text) {
+                last_invalidation=RangeTextInvalidation; return false;
+            }
+            ComPtr<ITfProperty> property;
+            VARIANT value{}; VariantInit(&value);
+            hr=context->GetProperty(composing_guid,&property);
+            if (SUCCEEDED(hr)) hr=property->GetValue(cookie,committed.Get(),&value);
+            bool ended=SUCCEEDED(hr) && (value.vt==VT_EMPTY ||
+                (value.vt==VT_I4 && value.lVal==0) || (value.vt==VT_BOOL && value.boolVal==VARIANT_FALSE));
+            VariantClear(&value);
+            if (!ended) { last_invalidation=CompositionInvalidation; return false; }
+        }
         BOOL selection_changed=TRUE;
         if (FAILED(record->GetSelectionStatus(&selection_changed))) return false;
-        if (!selection_changed) return true;
+        if (!selection_changed && !composition_updated) return true;
         TF_SELECTION selection{}; ULONG count=0;
         hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
         ComPtr<ITfRange> selected; selected.Attach(selection.range);
@@ -327,6 +363,7 @@ public:
             else if (SUCCEEDED(hr)) hr=E_FAIL;
             if (FAILED(hr)) { invalidate_edit(SnapshotInvalidation); emit(Error,hr); continue; }
             committed_style=selection.style;
+            committed_text.assign(buffer,count);
             committed_focus=GetFocus();
             ++commit_id;
             emit(Candidate,S_OK,std::wstring(buffer,count),0,old.started);

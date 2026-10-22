@@ -122,6 +122,20 @@ public:
     HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
         if (operation=="noop") return S_OK;
+        if (operation=="propertycycle") {
+            ComPtr<ITfRange> range,end;
+            HRESULT hr=context->GetStart(cookie,&range);
+            if (SUCCEEDED(hr)) hr=context->GetEnd(cookie,&end);
+            if (SUCCEEDED(hr)) hr=range->ShiftStartToRange(cookie,end.Get(),TF_ANCHOR_END);
+            LONG shifted=0;
+            if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-3,&shifted,nullptr);
+            ComPtr<ITfContextComposition> service;
+            ComPtr<ITfComposition> temporary;
+            if (SUCCEEDED(hr)) hr=context.As(&service);
+            if (SUCCEEDED(hr)) hr=service->StartComposition(cookie,range.Get(),
+                static_cast<ITfCompositionSink*>(this),&temporary);
+            return SUCCEEDED(hr)?temporary->EndComposition(cookie):hr;
+        }
         if (operation=="reselect" || operation=="movecaret" || operation=="moveleft" ||
             operation=="reverse" || operation=="sametext") {
             TF_SELECTION selection{}; ULONG count=0;

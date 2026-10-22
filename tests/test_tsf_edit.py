@@ -14,6 +14,48 @@ class EditFixture(Fixture):
 
 @unittest.skipUnless(sys.platform == 'win32' and EditFixture.executable.is_file(), 'Build TSF editing experiment first')
 class NativeEditTests(unittest.TestCase):
+    def test_composition_metadata_refresh_preserves_exact_commit_at_paragraph_positions(self):
+        setups = {'reset': '', 'paragraph': '前の行\r',
+                  'paragraph2': '前の行\r散歩', 'blankline': '前の行\r\r'}
+        with EditFixture() as fixture:
+            probe = NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe, lambda es: any(e['kind'] == 2 for e in es))
+                for setup, prefix in setups.items():
+                    for repetition in range(25):
+                        with self.subTest(setup=setup, repetition=repetition):
+                            fixture.command(setup); probe.drain()
+                            fixture.command('begin'); fixture.command('commitcaret')
+                            event = next(e for e in self.events(probe, lambda es: any(e['kind'] == 4 for e in es))
+                                         if e['kind'] == 4)
+                            for operation in ('propertycycle', 'reselect', 'propertycycle'):
+                                fixture.command(operation)
+                            notices = probe.drain()
+                            self.assertTrue(notices)
+                            self.assertTrue(all(e['revision'] == event['revision'] for e in notices))
+                            reply = probe.replace(event, 'さんぽ', '散歩')
+                            self.assertTrue(reply['success'], reply)
+                            self.assertEqual(self.text(fixture), prefix + '散歩')
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_metadata_refresh_cannot_restore_a_previously_invalidated_range(self):
+        with EditFixture() as fixture:
+            probe = NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe, lambda es: any(e['kind'] == 2 for e in es))
+                for operation in ('movecaret', 'sametext'):
+                    event = self.candidate(fixture, probe)
+                    fixture.command('propertycycle')
+                    fixture.command(operation)
+                    fixture.command('propertycycle')
+                    reply = probe.replace(event, 'さんぽ', '書かない')
+                    self.assertFalse(reply['success'], reply)
+                    self.assertFalse(reply['mutated'])
+                    self.assertEqual(self.text(fixture), 'さんぽ')
+            finally:
+                self.assertTrue(probe.close())
+
     def test_paragraph_positions_and_repeated_same_selection_keep_commit(self):
         setups = {'reset': '', 'paragraph': '前の行\r',
                   'paragraph2': '前の行\r散歩', 'blankline': '前の行\r\r'}
@@ -57,7 +99,7 @@ class NativeEditTests(unittest.TestCase):
                         self.assertEqual(self.text(fixture), 'さんぽ')
                         self.assertEqual(reply['diagnostic'] & 0xffff, 2)
                         self.assertEqual(reply['diagnostic'] >> 16,
-                                         {'movecaret': 104, 'sametext': 103, 'reverse': 105}[operation])
+                                         {'movecaret': 104, 'sametext': 109, 'reverse': 105}[operation])
                 for operation in ('moveleft',):
                     with self.subTest(operation=operation, caret=True):
                         fixture.command('paragraph')
