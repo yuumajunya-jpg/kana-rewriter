@@ -27,10 +27,18 @@ struct Shared {
     volatile LONG edit_state; // 0 idle, 1 queued, 2 validating, 3 done, 4 canceled, 5 writing
     ULONGLONG request_id, commit_id, revision, deadline;
     DWORD result, mutated;
+    DWORD diagnostic;
     wchar_t expected[text_limit], replacement[text_limit];
 };
 enum Kind { Attached=1, Context=2, Editing=3, Candidate=4, EmptyEnd=5,
             Error=6, Detached=7, Key=8, Unsupported=9 };
+// Low 16 bits: failed validation. High 16 bits: last range invalidation.
+enum Diagnostic : DWORD { NoReason=0, Stopped=1, MissingRange=2, ContextChanged=3,
+    CommitChanged=4, RevisionChanged=5, FocusChanged=6, Expired=7,
+    ForegroundChanged=8, ActiveComposition=9, TextMismatch=10,
+    KeyInvalidation=101, ContextInvalidation=102, EditInvalidation=103,
+    SelectionInvalidation=104, StyleInvalidation=105, InspectionInvalidation=106,
+    CompletedInvalidation=107, SnapshotInvalidation=108 };
 const GUID composing_guid = {0xe12ac060,0xaf15,0x11d2,{0xaf,0xc5,0x00,0x10,0x5a,0x27,0x99,0xb5}};
 HINSTANCE module_handle;
 UINT control_message;
@@ -81,8 +89,13 @@ public:
     HWND committed_focus=nullptr;
     ULONGLONG commit_id=0, edit_revision=0;
     bool applying=false;
-    void invalidate_edit() { committed.Reset(); committed_selection.Reset(); ++edit_revision; }
+    DWORD last_invalidation=NoReason;
+    void invalidate_edit(DWORD reason=EditInvalidation) {
+        committed.Reset(); committed_selection.Reset(); ++edit_revision; last_invalidation=reason;
+    }
     bool unchanged_commit(TfEditCookie cookie,ITfEditRecord* record) {
+        if (!committed) return false;
+        last_invalidation=InspectionInvalidation;
         if (!committed || !committed_selection || !record) return false;
         // OnEndEdit also reports a repeated SetSelection or property update.
         // Preserve only records with no text/composition changes and an
@@ -92,19 +105,24 @@ public:
         HRESULT hr=record->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT,properties,1,&updates);
         if (FAILED(hr) || !updates) return false;
         ComPtr<ITfRange> changed;
-        if (updates->Next(1,&changed,nullptr)!=S_FALSE) return false;
+        HRESULT next=updates->Next(1,&changed,nullptr);
+        if (next!=S_FALSE) { if (SUCCEEDED(next)) last_invalidation=EditInvalidation; return false; }
         BOOL selection_changed=TRUE;
         if (FAILED(record->GetSelectionStatus(&selection_changed))) return false;
         if (!selection_changed) return true;
         TF_SELECTION selection{}; ULONG count=0;
         hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
         ComPtr<ITfRange> selected; selected.Attach(selection.range);
-        if (FAILED(hr) || count!=1 || !selected ||
-            selection.style.ase!=committed_style.ase ||
-            selection.style.fInterimChar!=committed_style.fInterimChar) return false;
+        if (FAILED(hr) || count!=1 || !selected) return false;
+        if (selection.style.ase!=committed_style.ase ||
+            selection.style.fInterimChar!=committed_style.fInterimChar) {
+            last_invalidation=StyleInvalidation; return false;
+        }
         LONG start=1,end=1;
-        return SUCCEEDED(selected->CompareStart(cookie,committed_selection.Get(),TF_ANCHOR_START,&start)) &&
-            SUCCEEDED(selected->CompareEnd(cookie,committed_selection.Get(),TF_ANCHOR_END,&end)) && !start && !end;
+        if (FAILED(selected->CompareStart(cookie,committed_selection.Get(),TF_ANCHOR_START,&start)) ||
+            FAILED(selected->CompareEnd(cookie,committed_selection.Get(),TF_ANCHOR_END,&end))) return false;
+        if (start || end) { last_invalidation=SelectionInvalidation; return false; }
+        return true;
     }
     HRESULT request_edit();
     struct Range {
@@ -147,7 +165,7 @@ public:
     }
     bool stopping() const { return failed || !shared || shared->stop || !owner || WaitForSingleObject(owner,0)!=WAIT_TIMEOUT; }
     HRESULT clear_context() {
-        invalidate_edit();
+        invalidate_edit(ContextInvalidation);
         previous.clear(); canceled=false; last_key=0; last_modifiers=0; key_tick=0; ++generation;
         HRESULT hr=S_OK;
         if (context_source && text_cookie!=TF_INVALID_COOKIE) hr=context_source->UnadviseSink(text_cookie);
@@ -240,7 +258,7 @@ public:
     HRESULT STDMETHODCALLTYPE OnKeyTraceDown(WPARAM key,LPARAM) override {
         if (stopping()) return S_OK;
         // Any key, including a new composition, invalidates the retained commit.
-        invalidate_edit();
+        invalidate_edit(KeyInvalidation);
         last_key=static_cast<DWORD>(key);
         last_modifiers=modifier_state();
         key_tick=GetTickCount64();
@@ -251,7 +269,9 @@ public:
     HRESULT STDMETHODCALLTYPE OnEndEdit(ITfContext* edited,TfEditCookie cookie,ITfEditRecord* record) override {
         if (stopping() || edited!=context.Get()) return S_OK;
         if (applying) return S_OK;
-        if (!unchanged_commit(cookie,record)) invalidate_edit();
+        DWORD previous_invalidation=last_invalidation;
+        if (!unchanged_commit(cookie,record)) invalidate_edit(last_invalidation);
+        else last_invalidation=previous_invalidation;
         ++busy;
         try { read_edit(edited,cookie); } catch (...) { previous.clear(); emit(Error,E_FAIL); }
         --busy; return S_OK;
@@ -305,7 +325,7 @@ public:
             if (SUCCEEDED(hr) && selected_count==1 && selected)
                 hr=selected->Clone(&committed_selection);
             else if (SUCCEEDED(hr)) hr=E_FAIL;
-            if (FAILED(hr)) { invalidate_edit(); emit(Error,hr); continue; }
+            if (FAILED(hr)) { invalidate_edit(SnapshotInvalidation); emit(Error,hr); continue; }
             committed_style=selection.style;
             committed_focus=GetFocus();
             ++commit_id;
@@ -337,11 +357,18 @@ public:
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
     ULONG STDMETHODCALLTYPE Release() override { auto count=--refs; if (!count) delete this; return count; }
     HRESULT replace(TfEditCookie cookie) {
-        if (owner->stopping() || !range || context.Get()!=owner->context.Get() ||
-            commit!=owner->commit_id || revision!=owner->edit_revision || GetFocus()!=focus ||
-            GetTickCount64()>owner->shared->deadline) return HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH);
+        auto reject=[&](DWORD reason,HRESULT hr=HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH)) {
+            owner->shared->diagnostic=reason|(owner->last_invalidation<<16); return hr;
+        };
+        if (owner->stopping()) return reject(Stopped);
+        if (!range) return reject(MissingRange);
+        if (context.Get()!=owner->context.Get()) return reject(ContextChanged);
+        if (commit!=owner->commit_id) return reject(CommitChanged);
+        if (revision!=owner->edit_revision) return reject(RevisionChanged);
+        if (GetFocus()!=focus) return reject(FocusChanged);
+        if (GetTickCount64()>owner->shared->deadline) return reject(Expired);
         if (focus && GetAncestor(focus,GA_ROOT)!=GetForegroundWindow())
-            return HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH);
+            return reject(ForegroundChanged);
         ComPtr<ITfContextComposition> service;
         ComPtr<IEnumITfCompositionView> compositions;
         ComPtr<ITfCompositionView> active;
@@ -349,11 +376,11 @@ public:
         if (SUCCEEDED(hr)) hr=service->EnumCompositions(&compositions);
         if (FAILED(hr)) return hr;
         hr=compositions->Next(1,&active,nullptr);
-        if (hr!=S_FALSE) return FAILED(hr)?hr:E_PENDING;
+        if (hr!=S_FALSE) return reject(ActiveComposition,FAILED(hr)?hr:E_PENDING);
         wchar_t buffer[text_limit]{}; ULONG count=0;
         hr=range->GetText(cookie,0,buffer,text_limit,&count);
         if (FAILED(hr)) return hr;
-        if (std::wstring(buffer,count)!=expected) return HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH);
+        if (std::wstring(buffer,count)!=expected) return reject(TextMismatch);
         if (GetTickCount64()>owner->shared->deadline ||
             InterlockedCompareExchange(&owner->shared->edit_state,5,2)!=2) return E_ABORT;
         // The range is an object retained from this exact composition, not a
@@ -392,7 +419,7 @@ public:
         owner->applying=true;
         try { hr=replace(cookie); } catch (...) { hr=E_FAIL; }
         owner->applying=false;
-        owner->invalidate_edit(); // no replay, including a failed/partially applied write
+        owner->invalidate_edit(CompletedInvalidation); // no replay, including a failed/partially applied write
         shared->result=static_cast<DWORD>(hr);
         MemoryBarrier(); InterlockedExchange(&shared->edit_state,3);
         SetEvent(owner->edit_done);
@@ -496,6 +523,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI DroppedProbe() {
     return host_shared?static_cast<DWORD>(InterlockedCompareExchange(&host_shared->dropped,0,0)):0;
 }
 struct EditResult { DWORD hr, mutated, state; };
+extern "C" __declspec(dllexport) DWORD WINAPI LastEditDiagnostic() {
+    return host_shared?host_shared->diagnostic:0;
+}
 extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULONGLONG revision,
         const wchar_t* expected,const wchar_t* replacement,DWORD timeout,EditResult* result) {
     if (!host_shared || host_poisoned || !expected || !replacement || !result || !timeout ||
@@ -509,7 +539,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULON
     host_shared->commit_id=commit; host_shared->revision=revision;
     host_shared->deadline=GetTickCount64()+timeout;
     wcscpy_s(host_shared->expected,text_limit,expected); wcscpy_s(host_shared->replacement,text_limit,replacement);
-    host_shared->result=E_PENDING; host_shared->mutated=0;
+    host_shared->result=E_PENDING; host_shared->mutated=0; host_shared->diagnostic=0;
     MemoryBarrier(); InterlockedExchange(&host_shared->edit_state,1);
     if (!host_shared->control_hwnd || !PostMessageW(reinterpret_cast<HWND>(host_shared->control_hwnd),WM_APP+2,0,0)) {
         InterlockedExchange(&host_shared->edit_state,4); SetLastError(ERROR_NOT_READY); return FALSE;

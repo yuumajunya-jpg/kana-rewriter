@@ -13,6 +13,22 @@ from .tsf import Packet
 
 logger = logging.getLogger(__name__)
 
+DIAGNOSTICS = {
+    0: 'none', 1: 'stopped', 2: 'range_missing', 3: 'context_changed',
+    4: 'commit_changed', 5: 'revision_changed', 6: 'focus_changed',
+    7: 'expired', 8: 'foreground_changed', 9: 'active_composition', 10: 'source_mismatch',
+    101: 'key', 102: 'context', 103: 'text_or_composition_update',
+    104: 'selection_moved', 105: 'selection_style_changed', 106: 'inspection_failed',
+    107: 'previous_apply_completed', 108: 'selection_snapshot_failed',
+}
+
+
+def diagnostic_reason(value):
+    if not value:
+        return 'unavailable'
+    return (f"{DIAGNOSTICS.get(value & 0xffff, str(value & 0xffff))} / "
+            f"invalidated_by={DIAGNOSTICS.get(value >> 16, str(value >> 16))}")
+
 
 class EditPacket(C.Structure):
     _fields_ = Packet._fields_ + [("commit_id", C.c_uint64), ("revision", C.c_uint64)]
@@ -51,6 +67,11 @@ class NativeEditProbe:
         self.dll.ReplaceCommit.argtypes = [C.c_uint64, C.c_uint64, C.c_wchar_p,
                                           C.c_wchar_p, W.DWORD, C.POINTER(EditResult)]
         self.dll.ReplaceCommit.restype = W.BOOL
+        self.last_diagnostic = getattr(self.dll, 'LastEditDiagnostic', None)
+        if self.last_diagnostic is not None:
+            self.last_diagnostic.restype = W.DWORD
+        logger.debug('TSF編集DLL: path=%s / protocol=101 / detailed_diagnostics=%s',
+                     path.resolve(), self.last_diagnostic is not None)
         self.tid, self.started = tid, False
         self.lock = threading.RLock()
         self.last_candidate = None
@@ -91,7 +112,8 @@ class NativeEditProbe:
                                           replacement, timeout_ms, C.byref(result)):
                 raise C.WinError(C.get_last_error())
             return {"hr": result.hr, "mutated": bool(result.mutated), "state": result.state,
-                    "success": result.hr == 0 and result.state == 3}
+                    "success": result.hr == 0 and result.state == 3,
+                    "diagnostic": self.last_diagnostic() if self.last_diagnostic is not None and result.state == 3 else 0}
 
     def close(self):
         with self.lock:
@@ -149,13 +171,15 @@ def apply_commit(probe, event, captured, result, target=None):
     # Preserve native line endings in the expected range. The converter sees
     # normalized text, while TSF must verify the original UTF-16 contents.
     reply = probe.replace(event, event['text'], result)
+    reason = diagnostic_reason(reply.get('diagnostic', 0))
     logger.debug('TSF直接編集: commit=%s revision=%s / hr=0x%08x mutated=%s state=%s / %.3fms',
                  event['commit_id'], event['revision'], reply['hr'], reply['mutated'],
                  reply['state'], (time.perf_counter() - started) * 1000)
     if not reply['success']:
+        logger.debug('TSF適用拒否の詳細: %s', reason)
         suffix = '編集済み、または結果不明です。本文を確認してください' if reply['mutated'] else '書き込み前に中止しました'
         if reply['mutated'] or reply['state'] != 3:
             raise RestartRequired(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません。停止するので再起動してください")
-        raise RuntimeError(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません")
+        raise RuntimeError(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません（理由: {reason}）")
     return reply
 

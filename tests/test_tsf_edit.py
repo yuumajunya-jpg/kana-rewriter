@@ -55,6 +55,9 @@ class NativeEditTests(unittest.TestCase):
                         self.assertFalse(reply['success'])
                         self.assertFalse(reply['mutated'])
                         self.assertEqual(self.text(fixture), 'さんぽ')
+                        self.assertEqual(reply['diagnostic'] & 0xffff, 2)
+                        self.assertEqual(reply['diagnostic'] >> 16,
+                                         {'movecaret': 104, 'sametext': 103, 'reverse': 105}[operation])
                 for operation in ('moveleft',):
                     with self.subTest(operation=operation, caret=True):
                         fixture.command('paragraph')
@@ -68,6 +71,7 @@ class NativeEditTests(unittest.TestCase):
                         self.assertFalse(reply['success'])
                         self.assertFalse(reply['mutated'])
                         self.assertEqual(self.text(fixture), '前の行\rさんぽ')
+                        self.assertEqual(reply['diagnostic'] >> 16, 104)
             finally:
                 self.assertTrue(probe.close())
 
@@ -141,6 +145,7 @@ class NativeEditTests(unittest.TestCase):
                 result = probe.replace(event, '違う本文', '書かない')
                 self.assertFalse(result['success'])
                 self.assertFalse(result['mutated'])
+                self.assertEqual(result['diagnostic'] & 0xffff, 10)
                 self.assertEqual(self.text(fixture), 'さんぽ')
                 event = self.candidate(fixture, probe)
                 fixture.command('begin')

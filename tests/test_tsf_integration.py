@@ -12,6 +12,18 @@ from tests.test_auto_ime import FIELD, commit_events
 
 
 class IntegrationSettingsTests(unittest.TestCase):
+    def test_rejection_message_distinguishes_native_validation_and_invalidation(self):
+        from unittest.mock import Mock
+        from kana_rewriter.tsf_edit import apply_commit, diagnostic_reason
+        probe = Mock()
+        probe.replace.return_value = dict(success=False, hr=0x8007051a, mutated=False,
+                                         state=3, diagnostic=(104 << 16) | 2)
+        with self.assertRaisesRegex(RuntimeError, 'range_missing / invalidated_by=selection_moved'):
+            apply_commit(probe, dict(text='かな', commit_id=1, revision=2),
+                         SimpleNamespace(source='かな'), '仮名')
+        probe.replace.assert_called_once()
+        self.assertEqual(diagnostic_reason(0), 'unavailable')
+
     def test_paragraph_start_commit_matches_without_offset_guessing(self):
         from kana_rewriter.editor import TextState, make_capture
         for separator in ('\n', '\r\n', '\r', '\u2029'):
