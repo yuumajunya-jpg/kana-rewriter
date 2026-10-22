@@ -14,6 +14,7 @@
 using Microsoft::WRL::ComPtr;
 constexpr unsigned capacity = 64, text_limit = 1024;
 constexpr unsigned document_limit = 200000;
+constexpr unsigned context_character_limit = 1000, context_unit_limit = context_character_limit*2;
 struct Packet {
     DWORD kind, pid, tid, hr, key, active, modifiers;
     ULONGLONG tick, hwnd, generation, composition_tick;
@@ -24,7 +25,7 @@ constexpr DWORD ModifierCtrl=1, ModifierAlt=2, ModifierShift=4, ModifierWin=8;
 struct TextDiff { DWORD before,after,prefix,suffix,source_equal; };
 struct CommitContext {
     DWORD left_units,right_units;
-    wchar_t left[2001],right[2001];
+    wchar_t left[context_unit_limit+1],right[context_unit_limit+1];
 };
 struct Shared {
     volatile LONG write, read, dropped, stop, attached;
@@ -154,7 +155,7 @@ public:
     bool unchanged_commit(TfEditCookie cookie,ITfEditRecord* record) {
         if (!committed) return false;
         last_invalidation=InspectionInvalidation;
-        if (!committed || !committed_selection || !record) return false;
+        if (!committed_selection || !record) return false;
         // OnEndEdit also reports a repeated SetSelection or property update.
         // A notification alone does not prove a content change. Verify exact
         // change location for text notifications, then verify the original
@@ -170,6 +171,21 @@ public:
         bool outside_change=false;
         LONG change_start=0,change_end=0,new_change_end=0,change_delta=0;
         std::wstring updated_document;
+        std::wstring source_text;
+        bool source_read=false;
+        HRESULT source_hr=E_PENDING;
+        // One read per OnEndEdit cookie; the apply session still re-reads the
+        // original range immediately before writing.
+        auto read_source=[&]() {
+            if (!source_read) {
+                wchar_t value[text_limit]{}; ULONG count=0;
+                source_hr=committed->GetText(cookie,0,value,text_limit,&count);
+                if (SUCCEEDED(source_hr)) source_text.assign(value,count);
+                source_read=true;
+            }
+            return SUCCEEDED(source_hr);
+        };
+
         if (text_updated) {
             if (!document_snapshot_valid) { last_invalidation=DocumentSnapshotInvalidation; return false; }
             std::wstring document;
@@ -180,11 +196,9 @@ public:
                        document[prefix]==committed_document[prefix]) ++prefix;
                 while (suffix<document.size()-prefix && suffix<committed_document.size()-prefix &&
                        document[document.size()-1-suffix]==committed_document[committed_document.size()-1-suffix]) ++suffix;
-                wchar_t source[text_limit]{}; ULONG length=0;
-                HRESULT read_hr=committed->GetText(cookie,0,source,text_limit,&length);
                 last_text_diff={static_cast<DWORD>(committed_document.size()),static_cast<DWORD>(document.size()),
                     static_cast<DWORD>(prefix),static_cast<DWORD>(suffix),
-                    FAILED(read_hr)?2u:std::wstring(source,length)==committed_text?1u:0u};
+                    !read_source()?2u:source_text==committed_text?1u:0u};
                 last_inserted_text=document.substr(prefix,std::min<size_t>(16,document.size()-prefix-suffix));
                 last_original_units=static_cast<DWORD>(committed_text.size());
                 last_original_start=source_bounds.valid?static_cast<DWORD>(source_bounds.start):MAXDWORD;
@@ -229,9 +243,8 @@ public:
                 if (SUCCEEDED(hr)) last_invalidation=NewCompositionInvalidation;
                 return false;
             }
-            wchar_t text[text_limit]{}; ULONG length=0;
-            if (FAILED(committed->GetText(cookie,0,text,text_limit,&length))) return false;
-            if (std::wstring(text,length)!=committed_text) {
+            if (!read_source()) return false;
+            if (source_text!=committed_text) {
                 last_invalidation=RangeTextInvalidation; return false;
             }
             ComPtr<ITfProperty> property;
@@ -282,20 +295,25 @@ public:
         }
         return true;
     }
-    bool reference_equal(TfEditCookie cookie,ITfRange* range,const std::wstring& expected) {
-        if (!range) return true;
+    bool read_reference(TfEditCookie cookie,ITfRange* range,std::wstring& text) {
         ComPtr<ITfRange> copy;
         if (FAILED(range->Clone(&copy))) return false;
-        wchar_t value[2001]{}; ULONG count=0; BOOL empty=FALSE;
-        return SUCCEEDED(copy->GetText(cookie,TF_TF_MOVESTART,value,2001,&count)) &&
-            SUCCEEDED(copy->IsEmpty(cookie,&empty)) && empty && std::wstring(value,count)==expected;
+        wchar_t value[context_unit_limit+1]{}; ULONG count=0; BOOL empty=FALSE;
+        if (FAILED(copy->GetText(cookie,TF_TF_MOVESTART,value,context_unit_limit+1,&count)) ||
+            FAILED(copy->IsEmpty(cookie,&empty)) || !empty || count>context_unit_limit) return false;
+        text.assign(value,count); return true;
+    }
+    bool reference_equal(TfEditCookie cookie,ITfRange* range,const std::wstring& expected) {
+        if (!range) return true;
+        std::wstring text;
+        return read_reference(cookie,range,text) && text==expected;
     }
     bool references_equal(TfEditCookie cookie) {
         return reference_equal(cookie,reference_left.Get(),reference_left_text) &&
             reference_equal(cookie,reference_right.Get(),reference_right_text);
     }
     HRESULT capture_context(TfEditCookie cookie,DWORD characters,bool include_right) {
-        if (characters>1000) return E_INVALIDARG;
+        if (characters>context_character_limit) return E_INVALIDARG;
         ComPtr<ITfRange> l,r;
         HRESULT hr=committed->Clone(&l);
         if (SUCCEEDED(hr)) hr=committed->Clone(&r);
@@ -305,16 +323,8 @@ public:
         if (SUCCEEDED(hr)) hr=l->ShiftStart(cookie,-static_cast<LONG>(characters*2),&shifted,nullptr);
         if (SUCCEEDED(hr) && include_right) hr=r->ShiftEnd(cookie,static_cast<LONG>(characters*2),&shifted,nullptr);
         if (FAILED(hr)) return hr;
-        auto read=[&](ITfRange* range,std::wstring& value) {
-            ComPtr<ITfRange> copy;
-            if (FAILED(range->Clone(&copy))) return false;
-            wchar_t text[2001]{}; ULONG count=0; BOOL empty=FALSE;
-            if (FAILED(copy->GetText(cookie,TF_TF_MOVESTART,text,2001,&count)) ||
-                FAILED(copy->IsEmpty(cookie,&empty)) || !empty || count>2000) return false;
-            value.assign(text,count); return true;
-        };
         std::wstring lt,rt;
-        if (!read(l.Get(),lt) || !read(r.Get(),rt)) return E_FAIL;
+        if (!read_reference(cookie,l.Get(),lt) || !read_reference(cookie,r.Get(),rt)) return E_FAIL;
         size_t left=lt.size(),right=0;
         // Take only the requested normalized Unicode characters. Reading at
         // most two UTF-16 units per character avoids a document-wide read and
@@ -840,7 +850,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULON
 }
 extern "C" __declspec(dllexport) BOOL WINAPI CaptureCommitContext(ULONGLONG commit,ULONGLONG revision,
         const wchar_t* expected,DWORD characters,BOOL right,DWORD timeout,CommitContext* output,EditResult* result) {
-    if (!output || characters>1000) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (!output || characters>context_character_limit) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     BOOL ok=submit_commit(commit,revision,expected,L"",timeout,result,2,characters,right);
     if (ok && result->hr==S_OK && result->state==3) *output=host_shared->captured_context;
     return ok;

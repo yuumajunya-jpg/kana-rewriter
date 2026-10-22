@@ -1,7 +1,6 @@
 """Explicit feasibility trial; no UIA selection, SendInput, or fallback writes."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 import logging
 import sys
 import time
@@ -9,7 +8,8 @@ import time
 from .auto_ime import AutoImeMonitor
 from .core import Config, Converter
 from .diagnostic_log import DiagnosticLog
-from .tsf_edit import NativeEditProbe, edit_probe_path, apply_commit, capture_commit_context, RestartRequired
+from .tsf_edit import (EDIT_PROTOCOL_VERSION, NativeEditProbe, RestartRequired,
+                       apply_commit, capture_commit_context, edit_probe_path, normalize_newlines)
 from .timing import flush_logs
 
 logger = logging.getLogger(__name__)
@@ -17,15 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 def run(args):
-    from .direct import Desktop
     from .winapi import MessageWaiter, user, W
     import ctypes as C
     config = Config.load(args.config)
     if config.edit_backend == 'clipboard':
         raise ValueError('TSF実験は直接編集用の設定を使用してください')
-    config = replace(config, editor_worker='python')
     path = edit_probe_path()  # fail before loading AI or attaching
-    logger.debug('TSF編集実験DLL=%s / protocol=102', path)
+    logger.debug('TSF編集実験DLL=%s / protocol=%s', path, EDIT_PROTOCOL_VERSION)
     if (args.fixed_source is None) != (args.fixed_result is None):
         raise ValueError('--fixed-sourceと--fixed-resultは両方指定してください')
     if args.fixed_source is not None and not args.fixed_source:
@@ -44,12 +42,10 @@ def run(args):
         probe = NativeEditProbe(tid, path)
         current['probe'] = probe
         return probe
-    desktop = Desktop(config, debug=True, timings=True)
     monitor = AutoImeMonitor(config, waiter.wake, probe_factory=factory)
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
     try:
-        desktop.warmup()
         monitor.start()
         print('TSF直接編集実験: Enter確定後の対象を直接置換 / 終了はこの端末でCtrl+C', flush=True)
         print('通常版の変換プログラムは同時に起動しないでください。', flush=True)
@@ -64,7 +60,7 @@ def run(args):
                     try:
                         probe = current['probe']
                         event = dict(probe.last_candidate or {})
-                        if event.get('tick') != commit.tick or event.get('text', '').replace('\r\n', '\n').replace('\r', '\n') != commit.text:
+                        if event.get('tick') != commit.tick or normalize_newlines(event.get('text', '')) != commit.text:
                             raise RuntimeError('確定通知の識別が変わったため中止しました')
                         captured = capture_commit_context(probe, event, config.context_chars,
                                                           config.model_format not in {'jinen_v1', 'jinen_v2'})
@@ -102,9 +98,10 @@ def run(args):
     except KeyboardInterrupt:
         print('終了します', flush=True)
     finally:
-        monitor.close()
-        pool.shutdown(wait=True, cancel_futures=True)
-        desktop.close()
+        try:
+            monitor.close()
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
     return 0
 
 

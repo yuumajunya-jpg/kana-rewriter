@@ -1,5 +1,6 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import ctypes
 import sys
 import time
@@ -268,16 +269,18 @@ def run_windows(converter, config, debug=False, timings=False):
     except KeyboardInterrupt:
         print("終了します", flush=True)
     finally:
-        if auto_monitor is not None:
-            auto_monitor.close()
-        for ident in registered:
-            user.UnregisterHotKey(None, ident)
-        pool.shutdown(wait=True, cancel_futures=True)
-        try:
-            desktop.close()
-        finally:
+        # Attempt every cleanup even if an earlier callback fails. ExitStack
+        # retains the exception chain while releasing callbacks in this order:
+        # monitor, hotkeys, executor, editor, Japanese-key monitor.
+        with ExitStack() as cleanup:
             if japanese_release is not None:
-                japanese_release.close()
+                cleanup.callback(japanese_release.close)
+            cleanup.callback(desktop.close)
+            cleanup.callback(pool.shutdown, wait=True, cancel_futures=True)
+            for ident in reversed(registered):
+                cleanup.callback(user.UnregisterHotKey, None, ident)
+            if auto_monitor is not None:
+                cleanup.callback(auto_monitor.close)
     return 0
 
 

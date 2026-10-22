@@ -506,6 +506,71 @@ class NativeEditTests(unittest.TestCase):
                 self.assertTrue(probe.close())
 
 
+@unittest.skipUnless(sys.platform=='win32','Windows DLL')
+class NativeReplyTests(unittest.TestCase):
+    def make_probe(self, hr=0):
+        from unittest.mock import Mock, patch
+        dll=Mock()
+        dll.ProbeProtocolVersion.return_value=102
+        def replace(*args):
+            result=args[-1]._obj
+            result.hr,result.state,result.mutated=hr,3,int(hr==0)
+            return True
+        dll.ReplaceCommit.side_effect=replace
+        with patch('kana_rewriter.tsf_edit.C.WinDLL',return_value=dll):
+            probe=NativeEditProbe(42,'test.dll')
+        probe.started=True
+        return probe,dll
+
+    def test_success_does_not_fetch_or_format_failure_diagnostics(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from kana_rewriter.tsf_edit import apply_commit
+        probe,dll=self.make_probe()
+        with patch('kana_rewriter.tsf_edit.failure_reason') as reason:
+            reply=apply_commit(probe,dict(commit_id=1,revision=2,text='かな'),SimpleNamespace(source='かな'),'仮名')
+        self.assertTrue(reply['success'])
+        self.assertEqual(reply['diagnostic'],0)
+        self.assertIsNone(reply['text_diff'])
+        dll.ReplaceCommit.assert_called_once()
+        dll.LastEditDiagnostic.assert_not_called()
+        dll.LastEditTextDiff.assert_not_called()
+        dll.LastEditInsertedText.assert_not_called()
+        reason.assert_not_called()
+
+    def test_failure_keeps_range_and_inserted_units_in_message(self):
+        from types import SimpleNamespace
+        from kana_rewriter.tsf_edit import apply_commit
+        probe,dll=self.make_probe(0x8007051a)
+        dll.LastEditDiagnostic.return_value=2|(109<<16)
+        def diff(pointer):
+            for name,value in dict(before=8,after=11,prefix=7,suffix=1,source_equal=1).items():
+                setattr(pointer._obj,name,value)
+            return True
+        dll.LastEditTextDiff.side_effect=diff
+        def inserted(buffer,capacity):
+            buffer[0],buffer[1],buffer[2]='\u200b','\u200c','\n'
+            return 3
+        dll.LastEditInsertedText.side_effect=inserted
+        dll.LastEditOriginalUnits.return_value=7
+        dll.LastEditOriginalStart.return_value=0
+        with self.assertRaisesRegex(RuntimeError,'inserted_utf16=200b,200c,000a original_units=7 original_range=0:7'):
+            apply_commit(probe,dict(commit_id=1,revision=2,text='へんかんてすと'),
+                         SimpleNamespace(source='へんかんてすと'),'変換テスト')
+        dll.ReplaceCommit.assert_called_once()
+        dll.LastEditDiagnostic.assert_called_once()
+        dll.LastEditTextDiff.assert_called_once()
+
+    def test_incomplete_current_protocol_dll_is_rejected_before_start(self):
+        from unittest.mock import Mock,patch
+        dll=Mock()
+        dll.ProbeProtocolVersion.return_value=102
+        del dll.CaptureCommitContext
+        with patch('kana_rewriter.tsf_edit.C.WinDLL',return_value=dll), self.assertRaisesRegex(RuntimeError,'機能が不足'):
+            NativeEditProbe(42,'incomplete.dll')
+        dll.StartProbe.assert_not_called()
+
+
 class TrialRoutingTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform=='win32','Windows DLL')
     def test_old_edit_protocol_is_rejected_before_starting(self):
@@ -518,6 +583,12 @@ class TrialRoutingTests(unittest.TestCase):
         dll.PollProbe.assert_not_called()
 
     def test_unknown_write_stops_the_trial_and_closes_resources(self):
+        self.assert_trial_cleanup()
+
+    def test_trial_stops_executor_even_if_monitor_cleanup_fails(self):
+        self.assert_trial_cleanup(close_error=RuntimeError('close failed'))
+
+    def assert_trial_cleanup(self,close_error=None):
         from concurrent.futures import Future
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
@@ -530,13 +601,12 @@ class TrialRoutingTests(unittest.TestCase):
         focus = SimpleNamespace(target=(1, 2, 3), runtime=(4,))
         commit = SimpleNamespace(text='さんぽ', tick=12, focus=focus)
         monitor = Mock()
+        monitor.close.side_effect = close_error
         monitor.take.return_value = commit
         monitor.begin.return_value = monitor.valid.return_value = True
         def monitor_factory(config, wake, probe_factory):
             probe_factory(0)
             return monitor
-        desktop = Mock()
-        desktop.capture_commit.return_value = SimpleNamespace(source='さんぽ', left_context='', right_context='')
         future = Future(); future.set_result('散歩')
         pool = Mock(); pool.submit.return_value = future
         args = SimpleNamespace(config='unused', fixed_source='さんぽ', fixed_result='散歩')
@@ -545,16 +615,16 @@ class TrialRoutingTests(unittest.TestCase):
                 patch('kana_rewriter.tsf_edit_trial.NativeEditProbe', return_value=probe), \
                 patch('kana_rewriter.tsf_edit_trial.AutoImeMonitor', side_effect=monitor_factory), \
                 patch('kana_rewriter.tsf_edit_trial.ThreadPoolExecutor', return_value=pool), \
-                patch('kana_rewriter.direct.Desktop', return_value=desktop), \
+                patch('kana_rewriter.direct.Desktop') as desktop_factory, \
                 patch('kana_rewriter.direct_win32.window_identity', return_value=(1, 2, 3)), \
                 patch('kana_rewriter.winapi.MessageWaiter'), \
                 patch('kana_rewriter.winapi.user.PeekMessageW', return_value=0), patch('builtins.print'):
-            with self.assertRaises(RestartRequired):
+            with self.assertRaises(type(close_error) if close_error else RestartRequired):
                 run(args)
         probe.replace.assert_called_once()
         monitor.close.assert_called_once()
         pool.shutdown.assert_called_once()
-        desktop.close.assert_called_once()
+        desktop_factory.assert_not_called()
 
     def test_changed_foreground_rejects_before_native_edit(self):
         from types import SimpleNamespace

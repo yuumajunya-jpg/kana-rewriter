@@ -13,6 +13,8 @@ from .tsf import Packet
 
 logger = logging.getLogger(__name__)
 
+EDIT_PROTOCOL_VERSION = 102
+
 DIAGNOSTICS = {
     0: 'none', 1: 'stopped', 2: 'range_missing', 3: 'context_changed',
     4: 'commit_changed', 5: 'revision_changed', 6: 'focus_changed',
@@ -24,6 +26,10 @@ DIAGNOSTICS = {
     111: 'new_composition', 112: 'range_text_changed',
     113: 'document_snapshot_unavailable', 114: 'reference_context_changed',
 }
+
+
+def normalize_newlines(value):
+    return value.replace('\r\n', '\n').replace('\r', '\n')
 
 
 def diagnostic_reason(value):
@@ -68,7 +74,7 @@ class NativeEditProbe:
         path = Path(dll) if dll else edit_probe_path()
         self.dll = C.WinDLL(str(path.resolve()), use_last_error=True)
         self.dll.ProbeProtocolVersion.restype = W.DWORD
-        if self.dll.ProbeProtocolVersion() != 102:
+        if self.dll.ProbeProtocolVersion() != EDIT_PROTOCOL_VERSION:
             raise RuntimeError("TSF編集DLLの版が一致しません。Pythonと編集DLLを一緒に更新してください")
         self.dll.StartProbe.argtypes = [W.DWORD]
         self.dll.StartProbe.restype = W.BOOL
@@ -79,30 +85,28 @@ class NativeEditProbe:
         self.dll.ReplaceCommit.argtypes = [C.c_uint64, C.c_uint64, C.c_wchar_p,
                                           C.c_wchar_p, W.DWORD, C.POINTER(EditResult)]
         self.dll.ReplaceCommit.restype = W.BOOL
-        self.capture_native = getattr(self.dll, 'CaptureCommitContext', None)
-        if self.capture_native is not None:
-            self.capture_native.argtypes = [C.c_uint64, C.c_uint64, C.c_wchar_p, W.DWORD,
-                                           W.BOOL, W.DWORD, C.POINTER(CommitContext), C.POINTER(EditResult)]
-            self.capture_native.restype = W.BOOL
-        self.last_diagnostic = getattr(self.dll, 'LastEditDiagnostic', None)
-        if self.last_diagnostic is not None:
-            self.last_diagnostic.restype = W.DWORD
-        self.last_text_diff = getattr(self.dll, 'LastEditTextDiff', None)
-        if self.last_text_diff is not None:
-            self.last_text_diff.argtypes = [C.POINTER(TextDiff)]
-            self.last_text_diff.restype = W.BOOL
-        self.last_inserted_text = getattr(self.dll, 'LastEditInsertedText', None)
-        if self.last_inserted_text is not None:
-            self.last_inserted_text.argtypes = [C.POINTER(C.c_wchar), W.DWORD]
-            self.last_inserted_text.restype = W.DWORD
-        self.last_original_units = getattr(self.dll, 'LastEditOriginalUnits', None)
-        if self.last_original_units is not None:
-            self.last_original_units.restype = W.DWORD
-        self.last_original_start = getattr(self.dll, 'LastEditOriginalStart', None)
-        if self.last_original_start is not None:
-            self.last_original_start.restype = W.DWORD
-        logger.debug('TSF編集DLL: path=%s / protocol=102 / detailed_diagnostics=%s',
-                     path.resolve(), self.last_diagnostic is not None)
+        # Protocol 102 includes context capture and detailed diagnostics.
+        # Earlier DLLs have already been rejected above.
+        try:
+            self.capture_native = self.dll.CaptureCommitContext
+            self.last_diagnostic = self.dll.LastEditDiagnostic
+            self.last_text_diff = self.dll.LastEditTextDiff
+            self.last_inserted_text = self.dll.LastEditInsertedText
+            self.last_original_units = self.dll.LastEditOriginalUnits
+            self.last_original_start = self.dll.LastEditOriginalStart
+        except AttributeError as exc:
+            raise RuntimeError('TSF編集DLLの機能が不足しています。Pythonと編集DLLを一緒に更新してください') from exc
+        self.capture_native.argtypes = [C.c_uint64, C.c_uint64, C.c_wchar_p, W.DWORD,
+                                       W.BOOL, W.DWORD, C.POINTER(CommitContext), C.POINTER(EditResult)]
+        self.capture_native.restype = W.BOOL
+        self.last_diagnostic.restype = W.DWORD
+        self.last_text_diff.argtypes = [C.POINTER(TextDiff)]
+        self.last_text_diff.restype = W.BOOL
+        self.last_inserted_text.argtypes = [C.POINTER(C.c_wchar), W.DWORD]
+        self.last_inserted_text.restype = W.DWORD
+        self.last_original_units.restype = W.DWORD
+        self.last_original_start.restype = W.DWORD
+        logger.debug('TSF編集DLL: path=%s / protocol=%s', path.resolve(), EDIT_PROTOCOL_VERSION)
         self.tid, self.started = tid, False
         self.lock = threading.RLock()
         self.last_candidate = None
@@ -142,30 +146,29 @@ class NativeEditProbe:
             if not self.dll.ReplaceCommit(candidate["commit_id"], candidate["revision"], expected,
                                           replacement, timeout_ms, C.byref(result)):
                 raise C.WinError(C.get_last_error())
-            diff = TextDiff()
-            text_diff = ({name: getattr(diff, name) for name, _ in TextDiff._fields_}
-                         if result.state == 3 and self.last_text_diff is not None
-                         and self.last_text_diff(C.byref(diff)) else None)
-            if text_diff is not None and self.last_inserted_text is not None:
-                inserted = C.create_unicode_buffer(17)
-                count = self.last_inserted_text(inserted, 17)
-                raw = C.string_at(C.addressof(inserted), min(count, 16) * C.sizeof(C.c_wchar))
-                text_diff['inserted_utf16'] = ','.join(f'{int.from_bytes(raw[i:i+2], "little"):04x}'
-                                                     for i in range(0, len(raw), 2))
-            if text_diff is not None and self.last_original_units is not None:
-                text_diff['original_units'] = self.last_original_units()
-            if text_diff is not None and self.last_original_start is not None:
-                position = self.last_original_start()
-                if position != 0xffffffff:
-                    text_diff['original_start'] = position
+            success = result.hr == 0 and result.state == 3
+            failed = not success and result.state == 3
             return {"hr": result.hr, "mutated": bool(result.mutated), "state": result.state,
-                    "success": result.hr == 0 and result.state == 3,
-                    "diagnostic": self.last_diagnostic() if self.last_diagnostic is not None and result.state == 3 else 0,
-                    "text_diff": text_diff}
+                    "success": success, "diagnostic": self.last_diagnostic() if failed else 0,
+                    "text_diff": self._failure_text_diff() if failed else None}
+
+    def _failure_text_diff(self):
+        diff = TextDiff()
+        if not self.last_text_diff(C.byref(diff)):
+            return None
+        value = {name: getattr(diff, name) for name, _ in TextDiff._fields_}
+        inserted = C.create_unicode_buffer(17)
+        count = self.last_inserted_text(inserted, 17)
+        raw = C.string_at(C.addressof(inserted), min(count, 16) * C.sizeof(C.c_wchar))
+        value['inserted_utf16'] = ','.join(f'{int.from_bytes(raw[i:i+2], "little"):04x}'
+                                          for i in range(0, len(raw), 2))
+        value['original_units'] = self.last_original_units()
+        position = self.last_original_start()
+        if position != 0xffffffff:
+            value['original_start'] = position
+        return value
 
     def capture_context(self, candidate, context_chars, include_right=True, timeout_ms=1500):
-        if self.capture_native is None:
-            raise RuntimeError('TSF文脈取得に非対応のDLLです。Pythonと編集DLLを一緒に更新してください')
         if not 0 <= context_chars <= 1000:
             raise ValueError('context_chars must be between 0 and 1000')
         if not 1 <= timeout_ms <= 10000:
@@ -180,7 +183,7 @@ class NativeEditProbe:
             if result.state != 3:
                 raise RestartRequired('TSF文脈取得が完了しませんでした。再送せず停止するので再起動してください')
             if result.hr:
-                reason = diagnostic_reason(self.last_diagnostic() if self.last_diagnostic is not None else 0)
+                reason = diagnostic_reason(self.last_diagnostic())
                 raise RuntimeError(f'TSF文脈取得 hr=0x{result.hr:08x}: {reason}')
             return output.left, output.right
 
@@ -217,7 +220,7 @@ class TsfCommitEditor:
         if not commit.native_range or probe is None or not probe.started or probe.tid != commit.focus.tid:
             raise RuntimeError('この確定通知のTSF編集範囲を確認できません')
         identity, revision, text = commit.native_range
-        if text.replace('\r\n', '\n').replace('\r', '\n') != commit.text:
+        if normalize_newlines(text) != commit.text:
             raise RuntimeError('TSF範囲と確定通知の本文が一致しません')
         return PreparedEdit(probe, dict(commit_id=identity, revision=revision, text=text), commit.focus.target)
 
@@ -232,15 +235,14 @@ def capture_commit_context(probe, event, context_chars, include_right=True):
     from .core import Capture
     from .text import TextRegion
     left, right = probe.capture_context(event, context_chars, include_right)
-    normalize = lambda value: value.replace('\r\n', '\n').replace('\r', '\n')
-    left, source, right = map(normalize, (left, event['text'], right))
+    left, source, right = map(normalize_newlines, (left, event['text'], right))
     logger.debug('TSF文脈取得: 対象=%r / 左=%r / 右=%r', source, left, right)
     return Capture(left + source + right, None, TextRegion(left, source, right), len(left + source))
 
 
 def apply_commit(probe, event, captured, result, target=None):
     """One exact retained range. Caller checks focus; native revalidates edits."""
-    if event['text'].replace('\r\n', '\n').replace('\r', '\n') != captured.source:
+    if normalize_newlines(event['text']) != captured.source:
         raise RuntimeError('TSF確定範囲と取得した対象が一致しません')
     if result == captured.source:
         return None
@@ -253,6 +255,20 @@ def apply_commit(probe, event, captured, result, target=None):
     # Preserve native line endings in the expected range. The converter sees
     # normalized text, while TSF must verify the original UTF-16 contents.
     reply = probe.replace(event, event['text'], result)
+    logger.debug('TSF直接編集: commit=%s revision=%s / hr=0x%08x mutated=%s state=%s / %.3fms',
+                 event['commit_id'], event['revision'], reply['hr'], reply['mutated'],
+                 reply['state'], (time.perf_counter() - started) * 1000)
+    if not reply['success']:
+        reason = failure_reason(reply)
+        logger.debug('TSF適用拒否の詳細: %s', reason)
+        suffix = '編集済み、または結果不明です。本文を確認してください' if reply['mutated'] else '書き込み前に中止しました'
+        if reply['mutated'] or reply['state'] != 3:
+            raise RestartRequired(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません。停止するので再起動してください")
+        raise RuntimeError(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません（理由: {reason}）")
+    return reply
+
+
+def failure_reason(reply):
     reason = diagnostic_reason(reply.get('diagnostic', 0))
     diff = reply.get('text_diff')
     if diff:
@@ -266,14 +282,4 @@ def apply_commit(probe, event, captured, result, target=None):
             reason += f" original_units={diff['original_units']}"
         if 'original_start' in diff:
             reason += f" original_range={diff['original_start']}:{diff['original_start'] + diff['original_units']}"
-    logger.debug('TSF直接編集: commit=%s revision=%s / hr=0x%08x mutated=%s state=%s / %.3fms',
-                 event['commit_id'], event['revision'], reply['hr'], reply['mutated'],
-                 reply['state'], (time.perf_counter() - started) * 1000)
-    if not reply['success']:
-        logger.debug('TSF適用拒否の詳細: %s', reason)
-        suffix = '編集済み、または結果不明です。本文を確認してください' if reply['mutated'] else '書き込み前に中止しました'
-        if reply['mutated'] or reply['state'] != 3:
-            raise RestartRequired(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません。停止するので再起動してください")
-        raise RuntimeError(f"TSF直接編集 hr=0x{reply['hr']:08x}: {suffix}。再送はしません（理由: {reason}）")
-    return reply
-
+    return reason
