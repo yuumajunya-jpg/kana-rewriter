@@ -34,6 +34,7 @@ struct Shared {
     wchar_t inserted_text[17];
     DWORD inserted_count;
     DWORD original_units;
+    DWORD original_start;
     wchar_t expected[text_limit], replacement[text_limit];
 };
 enum Kind { Attached=1, Context=2, Editing=3, Candidate=4, EmptyEnd=5,
@@ -99,6 +100,21 @@ public:
     TextDiff last_text_diff{};
     std::wstring last_inserted_text;
     DWORD last_original_units=0;
+    DWORD last_original_start=MAXDWORD;
+    struct Bounds { LONG start=0,length=0; bool valid=false; };
+    Bounds source_bounds,selection_bounds;
+    TfGravity write_start_gravity=TF_GRAVITY_BACKWARD,write_end_gravity=TF_GRAVITY_FORWARD;
+    bool bounded_anchors=false;
+    static Bounds bounds(ITfRange* range) {
+        Bounds value;
+        ComPtr<ITfRangeACP> acp;
+        if (range && SUCCEEDED(range->QueryInterface(IID_PPV_ARGS(&acp))) &&
+            SUCCEEDED(acp->GetExtent(&value.start,&value.length)) && value.start>=0 && value.length>=0 &&
+            static_cast<unsigned>(value.start)<=document_limit &&
+            static_cast<unsigned>(value.length)<=document_limit-static_cast<unsigned>(value.start))
+            value.valid=true;
+        return value;
+    }
     TF_SELECTIONSTYLE committed_style{};
     HWND committed_focus=nullptr;
     ULONGLONG commit_id=0, edit_revision=0;
@@ -107,6 +123,7 @@ public:
     void invalidate_edit(DWORD reason=EditInvalidation) {
         committed.Reset(); committed_selection.Reset(); committed_text.clear();
         committed_document.clear(); document_snapshot_valid=false;
+        source_bounds={}; selection_bounds={}; bounded_anchors=false;
         ++edit_revision; last_invalidation=reason;
     }
     bool read_document(TfEditCookie cookie,std::wstring& text) {
@@ -140,6 +157,9 @@ public:
         HRESULT next=updates->Next(1,&changed,nullptr);
         if (next!=S_OK && next!=S_FALSE) return false;
         bool text_updated=next==S_OK;
+        int marker_delta=0;
+        LONG marker_position=0;
+        std::wstring updated_document;
         if (text_updated) {
             if (!document_snapshot_valid) { last_invalidation=DocumentSnapshotInvalidation; return false; }
             std::wstring document;
@@ -157,7 +177,26 @@ public:
                     FAILED(read_hr)?2u:std::wstring(source,length)==committed_text?1u:0u};
                 last_inserted_text=document.substr(prefix,std::min<size_t>(16,document.size()-prefix-suffix));
                 last_original_units=static_cast<DWORD>(committed_text.size());
-                last_invalidation=TextInvalidation; return false;
+                last_original_start=source_bounds.valid?static_cast<DWORD>(source_bounds.start):MAXDWORD;
+                // Only the observed pair at the end of this exact composition
+                // is structural. Do not strip format characters globally.
+                if (bounded_anchors && source_bounds.valid && selection_bounds.valid) {
+                    marker_position=source_bounds.start+source_bounds.length;
+                    size_t position=static_cast<size_t>(marker_position);
+                    const std::wstring marker=L"\x200b\x200c";
+                    if (position<=committed_document.size() && document.size()==committed_document.size()+2 &&
+                        document.compare(0,position,committed_document,0,position)==0 &&
+                        document.compare(position,2,marker)==0 &&
+                        document.compare(position+2,std::wstring::npos,committed_document,position,std::wstring::npos)==0)
+                        marker_delta=2;
+                    else if (position+2<=committed_document.size() && document.size()+2==committed_document.size() &&
+                        committed_document.compare(position,2,marker)==0 &&
+                        document.compare(0,position,committed_document,0,position)==0 &&
+                        document.compare(position,std::wstring::npos,committed_document,position+2,std::wstring::npos)==0)
+                        marker_delta=-2;
+                }
+                if (!marker_delta) { last_invalidation=TextInvalidation; return false; }
+                updated_document=std::move(document);
             }
         }
         updates.Reset(); changed.Reset();
@@ -204,9 +243,30 @@ public:
             last_invalidation=StyleInvalidation; return false;
         }
         LONG start=1,end=1;
-        if (FAILED(selected->CompareStart(cookie,committed_selection.Get(),TF_ANCHOR_START,&start)) ||
-            FAILED(selected->CompareEnd(cookie,committed_selection.Get(),TF_ANCHOR_END,&end))) return false;
-        if (start || end) { last_invalidation=SelectionInvalidation; return false; }
+        if (marker_delta) {
+            Bounds actual_source=bounds(committed.Get()),actual_selection=bounds(selected.Get());
+            if (!actual_source.valid || !actual_selection.valid || actual_source.start!=source_bounds.start ||
+                actual_source.length!=source_bounds.length) { last_invalidation=RangeTextInvalidation; return false; }
+            auto same_point=[&](LONG before,LONG after) {
+                if (before<marker_position) return before==after;
+                if (before==marker_position) return after==before || (marker_delta>0 && after==before+2);
+                if (marker_delta<0 && before<marker_position+2) return false;
+                return after==before+marker_delta;
+            };
+            if (!same_point(selection_bounds.start,actual_selection.start) ||
+                !same_point(selection_bounds.start+selection_bounds.length,actual_selection.start+actual_selection.length)) {
+                last_invalidation=SelectionInvalidation; return false;
+            }
+            ComPtr<ITfRange> saved_selection;
+            if (FAILED(selected->Clone(&saved_selection))) return false;
+            committed_selection=std::move(saved_selection);
+            selection_bounds=actual_selection;
+            committed_document=std::move(updated_document);
+        } else {
+            if (FAILED(selected->CompareStart(cookie,committed_selection.Get(),TF_ANCHOR_START,&start)) ||
+                FAILED(selected->CompareEnd(cookie,committed_selection.Get(),TF_ANCHOR_END,&end))) return false;
+            if (start || end) { last_invalidation=SelectionInvalidation; return false; }
+        }
         return true;
     }
     HRESULT request_edit();
@@ -413,10 +473,14 @@ public:
             if (FAILED(hr)) { invalidate_edit(SnapshotInvalidation); emit(Error,hr); continue; }
             committed_style=selection.style;
             committed_text.assign(buffer,count);
+            source_bounds=bounds(this->committed.Get()); selection_bounds=bounds(selected.Get());
+            bounded_anchors=SUCCEEDED(this->committed->GetGravity(&write_start_gravity,&write_end_gravity)) &&
+                SUCCEEDED(this->committed->SetGravity(cookie,TF_GRAVITY_FORWARD,TF_GRAVITY_BACKWARD));
             document_snapshot_valid=read_document(cookie,committed_document);
             last_text_diff={};
             last_inserted_text.clear();
             last_original_units=0;
+            last_original_start=MAXDWORD;
             committed_focus=GetFocus();
             ++commit_id;
             emit(Candidate,S_OK,std::wstring(buffer,count),0,old.started);
@@ -454,6 +518,7 @@ public:
                 std::copy(owner->last_inserted_text.begin(),owner->last_inserted_text.end(),owner->shared->inserted_text);
                 owner->shared->inserted_count=static_cast<DWORD>(owner->last_inserted_text.size());
                 owner->shared->original_units=owner->last_original_units;
+                owner->shared->original_start=owner->last_original_start;
             }
             owner->shared->diagnostic=reason|(owner->last_invalidation<<16); return hr;
         };
@@ -478,6 +543,10 @@ public:
         hr=range->GetText(cookie,0,buffer,text_limit,&count);
         if (FAILED(hr)) return hr;
         if (std::wstring(buffer,count)!=expected) return reject(TextMismatch);
+        if (owner->bounded_anchors) {
+            hr=range->SetGravity(cookie,owner->write_start_gravity,owner->write_end_gravity);
+            if (FAILED(hr)) return hr;
+        }
         if (GetTickCount64()>owner->shared->deadline ||
             InterlockedCompareExchange(&owner->shared->edit_state,5,2)!=2) return E_ABORT;
         // The range is an object retained from this exact composition, not a
@@ -635,6 +704,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI LastEditInsertedText(wchar_t* valu
 extern "C" __declspec(dllexport) DWORD WINAPI LastEditOriginalUnits() {
     return host_shared?host_shared->original_units:0;
 }
+extern "C" __declspec(dllexport) DWORD WINAPI LastEditOriginalStart() {
+    return host_shared?host_shared->original_start:MAXDWORD;
+}
 extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULONGLONG revision,
         const wchar_t* expected,const wchar_t* replacement,DWORD timeout,EditResult* result) {
     if (!host_shared || host_poisoned || !expected || !replacement || !result || !timeout ||
@@ -653,6 +725,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULON
     std::fill_n(host_shared->inserted_text,17,L'\0');
     host_shared->inserted_count=0;
     host_shared->original_units=0;
+    host_shared->original_start=MAXDWORD;
     MemoryBarrier(); InterlockedExchange(&host_shared->edit_state,1);
     if (!host_shared->control_hwnd || !PostMessageW(reinterpret_cast<HWND>(host_shared->control_hwnd),WM_APP+2,0,0)) {
         InterlockedExchange(&host_shared->edit_state,4); SetLastError(ERROR_NOT_READY); return FALSE;

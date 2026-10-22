@@ -88,6 +88,9 @@ class NativeEditProbe:
         self.last_original_units = getattr(self.dll, 'LastEditOriginalUnits', None)
         if self.last_original_units is not None:
             self.last_original_units.restype = W.DWORD
+        self.last_original_start = getattr(self.dll, 'LastEditOriginalStart', None)
+        if self.last_original_start is not None:
+            self.last_original_start.restype = W.DWORD
         logger.debug('TSF編集DLL: path=%s / protocol=101 / detailed_diagnostics=%s',
                      path.resolve(), self.last_diagnostic is not None)
         self.tid, self.started = tid, False
@@ -141,6 +144,10 @@ class NativeEditProbe:
                                                      for i in range(0, len(raw), 2))
             if text_diff is not None and self.last_original_units is not None:
                 text_diff['original_units'] = self.last_original_units()
+            if text_diff is not None and self.last_original_start is not None:
+                position = self.last_original_start()
+                if position != 0xffffffff:
+                    text_diff['original_start'] = position
             return {"hr": result.hr, "mutated": bool(result.mutated), "state": result.state,
                     "success": result.hr == 0 and result.state == 3,
                     "diagnostic": self.last_diagnostic() if self.last_diagnostic is not None and result.state == 3 else 0,
@@ -213,6 +220,8 @@ def apply_commit(probe, event, captured, result, target=None):
             reason += f" inserted_utf16={diff['inserted_utf16'] or 'none'}"
         if 'original_units' in diff:
             reason += f" original_units={diff['original_units']}"
+        if 'original_start' in diff:
+            reason += f" original_range={diff['original_start']}:{diff['original_start'] + diff['original_units']}"
     logger.debug('TSF直接編集: commit=%s revision=%s / hr=0x%08x mutated=%s state=%s / %.3fms',
                  event['commit_id'], event['revision'], reply['hr'], reply['mutated'],
                  reply['state'], (time.perf_counter() - started) * 1000)

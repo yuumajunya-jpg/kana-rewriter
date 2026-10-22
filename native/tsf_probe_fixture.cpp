@@ -122,6 +122,37 @@ public:
     HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
         if (operation=="noop") return S_OK;
+        if (operation=="insertmarkers" || operation=="insertmarkersbeforecaret" ||
+            operation=="insertmarkersinside" || operation=="insertwrongmarkers" || operation=="removemarkers") {
+            TF_SELECTION selection{}; ULONG count=0;
+            HRESULT hr=context->GetSelection(cookie,TF_DEFAULT_SELECTION,1,&selection,&count);
+            ComPtr<ITfRange> range; range.Attach(selection.range);
+            if (FAILED(hr) || count!=1 || !range) return E_FAIL;
+            ComPtr<ITfRange> caret;
+            hr=range->Clone(&caret);
+            if (SUCCEEDED(hr)) hr=caret->SetGravity(cookie,TF_GRAVITY_BACKWARD,TF_GRAVITY_BACKWARD);
+            if (operation=="removemarkers") {
+                LONG shifted=0;
+                if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-2,&shifted,nullptr);
+                wchar_t text[2]{}; ULONG length=0;
+                if (SUCCEEDED(hr)) hr=range->GetText(cookie,0,text,2,&length);
+                if (FAILED(hr) || shifted!=-2 || length!=2 || text[0]!=L'\x200b' || text[1]!=L'\x200c') return E_FAIL;
+                return range->SetText(cookie,0,L"",0);
+            }
+            if (operation=="insertmarkersinside") {
+                LONG shifted=0;
+                if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-2,&shifted,nullptr);
+                if (SUCCEEDED(hr)) hr=range->Collapse(cookie,TF_ANCHOR_START);
+                if (SUCCEEDED(hr) && shifted!=-2) hr=E_FAIL;
+            }
+            const wchar_t* text=operation=="insertwrongmarkers"?L"\x200c\x200b":L"\x200b\x200c";
+            if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,text,2);
+            if (operation=="insertmarkersbeforecaret") {
+                TF_SELECTION selected{caret.Get(),{TF_AE_END,FALSE}};
+                if (SUCCEEDED(hr)) hr=context->SetSelection(cookie,1,&selected);
+            }
+            return hr;
+        }
         if (operation=="insertlinebefore" || operation=="insertlettersbefore") {
             ComPtr<ITfRange> range;
             HRESULT hr=context->GetEnd(cookie,&range);
@@ -197,7 +228,7 @@ public:
             if (operation=="reverse") selection.style.ase=TF_AE_START;
             return context->SetSelection(cookie,1,&selection);
         }
-        if (operation=="reset" || operation=="paragraph" || operation=="paragraph2" || operation=="blankline") {
+        if (operation=="reset" || operation=="paragraph" || operation=="paragraph2" || operation=="blankline" || operation=="reported") {
             if (*composition) return E_UNEXPECTED;
             ComPtr<ITfRange> range,end;
             HRESULT hr=context->GetStart(cookie,&range);
@@ -205,14 +236,20 @@ public:
             if (SUCCEEDED(hr)) hr=range->ShiftEndToRange(cookie,end.Get(),TF_ANCHOR_END);
             std::wstring text=operation=="paragraph"?L"前の行\rさんぽ":
                 operation=="paragraph2"?L"前の行\r散歩さんぽ":
-                operation=="blankline"?L"前の行\r\rさんぽ":L"さんぽ";
+                operation=="blankline"?L"前の行\r\rさんぽ":
+                operation=="reported"?std::wstring(9,L'a')+L"へんかんてすと\r\n":L"さんぽ";
             if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,text.c_str(),static_cast<LONG>(text.size()));
             if (FAILED(hr)) return hr;
             if (operation!="reset") {
                 hr=range->Collapse(cookie,TF_ANCHOR_END);
                 LONG shifted=0;
-                if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-3,&shifted,nullptr);
-                if (FAILED(hr) || shifted!=-3) return E_FAIL;
+                LONG width=operation=="reported"?9:3;
+                if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-width,&shifted,nullptr);
+                if (FAILED(hr) || shifted!=-width) return E_FAIL;
+                if (operation=="reported") {
+                    hr=range->ShiftEnd(cookie,-2,&shifted,nullptr);
+                    if (FAILED(hr) || shifted!=-2) return E_FAIL;
+                }
             }
             TF_SELECTION selected{range.Get(),{TF_AE_END,FALSE}};
             return context->SetSelection(cookie,1,&selected);

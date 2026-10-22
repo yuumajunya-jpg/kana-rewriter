@@ -14,6 +14,65 @@ class EditFixture(Fixture):
 
 @unittest.skipUnless(sys.platform == 'win32' and EditFixture.executable.is_file(), 'Build TSF editing experiment first')
 class NativeEditTests(unittest.TestCase):
+    def test_end_markers_preserved_across_positions_carets_and_refresh_cycles(self):
+        setups = {'reset': ('', 'さんぽ', '散歩', ''),
+                  'paragraph': ('前の行\r', 'さんぽ', '散歩', ''),
+                  'paragraph2': ('前の行\r散歩', 'さんぽ', '散歩', ''),
+                  'blankline': ('前の行\r\r', 'さんぽ', '散歩', ''),
+                  'reported': ('a'*9, 'へんかんてすと', '変換テスト', '\r\n')}
+        marker='\u200b\u200c'
+        variants = (('insertmarkers',), ('insertmarkersbeforecaret',),
+                    ('insertmarkers', 'removemarkers', 'insertmarkers'),
+                    ('insertmarkers', 'insertmarkers'))
+        with EditFixture() as fixture:
+            probe = NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe, lambda es: any(e['kind'] == 2 for e in es))
+                for setup, (prefix, source, result, suffix) in setups.items():
+                    for operations in variants:
+                        for repetition in range(20):
+                            with self.subTest(setup=setup, operations=operations, repetition=repetition):
+                                fixture.command(setup); probe.drain()
+                                fixture.command('begin'); fixture.command('commitcaret')
+                                event = next(e for e in self.events(probe, lambda es: any(e['kind'] == 4 for e in es))
+                                             if e['kind'] == 4)
+                                self.assertEqual(event['text'], source)
+                                for operation in operations: fixture.command(operation)
+                                notices=probe.drain()
+                                self.assertTrue(all(e['revision']==event['revision'] for e in notices))
+                                reply=probe.replace(event,source,result)
+                                self.assertTrue(reply['success'],reply)
+                                count=2 if operations==('insertmarkers','insertmarkers') else 1
+                                self.assertEqual(self.text(fixture),prefix+result+marker*count+suffix)
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_internal_or_different_marker_insertions_do_not_write(self):
+        with EditFixture() as fixture:
+            probe = NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe, lambda es: any(e['kind']==2 for e in es))
+                for operation in ('insertmarkersinside','insertwrongmarkers','insertlettersbefore'):
+                    fixture.command('reported'); probe.drain()
+                    fixture.command('begin'); fixture.command('commitcaret')
+                    event=next(e for e in self.events(probe,lambda es:any(e['kind']==4 for e in es)) if e['kind']==4)
+                    fixture.command(operation)
+                    reply=probe.replace(event,'へんかんてすと','書かない')
+                    self.assertFalse(reply['success'],reply)
+                    self.assertFalse(reply['mutated'])
+                for operations in (('insertmarkers','begin'), ('moveleft','insertmarkers'),
+                                   ('differenttext','insertmarkers')):
+                    fixture.command('reported'); probe.drain()
+                    fixture.command('begin'); fixture.command('commitcaret')
+                    event=next(e for e in self.events(probe,lambda es:any(e['kind']==4 for e in es)) if e['kind']==4)
+                    for operation in operations: fixture.command(operation)
+                    reply=probe.replace(event,'へんかんてすと','書かない')
+                    self.assertFalse(reply['success'],reply)
+                    self.assertFalse(reply['mutated'])
+                    if operations[-1]=='begin': fixture.command('cancel')
+            finally:
+                self.assertTrue(probe.close())
+
     def test_identical_text_refresh_preserves_exact_range_and_selection(self):
         setups = {'reset': '', 'paragraph': '前の行\r',
                   'paragraph2': '前の行\r散歩', 'blankline': '前の行\r\r'}
@@ -54,7 +113,7 @@ class NativeEditTests(unittest.TestCase):
                     self.assertEqual(reply['text_diff']['before'], 7)
                     if operation == 'changecontext':
                         self.assertEqual(reply['text_diff'], dict(before=7, after=7, prefix=0,
-                            suffix=6, source_equal=1, inserted_utf16='5225', original_units=3))
+                            suffix=6, source_equal=1, inserted_utf16='5225', original_units=3, original_start=4))
             finally:
                 self.assertTrue(probe.close())
 
@@ -76,7 +135,7 @@ class NativeEditTests(unittest.TestCase):
                             self.assertFalse(reply['success'])
                             self.assertFalse(reply['mutated'])
                             self.assertEqual(reply['text_diff'], dict(before=7, after=9, prefix=4,
-                                suffix=3, source_equal=0, inserted_utf16=units, original_units=3))
+                                suffix=3, source_equal=1, inserted_utf16=units, original_units=3, original_start=4))
             finally:
                 self.assertTrue(probe.close())
 
