@@ -122,6 +122,20 @@ public:
     HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
         if (operation=="noop") return S_OK;
+        if (operation=="insertlinebefore" || operation=="insertlettersbefore") {
+            ComPtr<ITfRange> range;
+            HRESULT hr=context->GetEnd(cookie,&range);
+            LONG shifted=0;
+            if (SUCCEEDED(hr)) hr=range->ShiftStart(cookie,-3,&shifted,nullptr);
+            if (SUCCEEDED(hr) && shifted!=-3) hr=E_FAIL;
+            if (SUCCEEDED(hr)) hr=range->Collapse(cookie,TF_ANCHOR_START);
+            const wchar_t* inserted=operation=="insertlinebefore"?L"\r\n":L"追加";
+            if (SUCCEEDED(hr)) hr=range->SetText(cookie,0,inserted,2);
+            range.Reset();
+            if (SUCCEEDED(hr)) hr=context->GetEnd(cookie,&range);
+            TF_SELECTION selected{range.Get(),{TF_AE_END,FALSE}};
+            return SUCCEEDED(hr)?context->SetSelection(cookie,1,&selected):hr;
+        }
         if (operation=="propertycycle") {
             ComPtr<ITfRange> range,end;
             HRESULT hr=context->GetStart(cookie,&range);

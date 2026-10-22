@@ -81,6 +81,13 @@ class NativeEditProbe:
         if self.last_text_diff is not None:
             self.last_text_diff.argtypes = [C.POINTER(TextDiff)]
             self.last_text_diff.restype = W.BOOL
+        self.last_inserted_text = getattr(self.dll, 'LastEditInsertedText', None)
+        if self.last_inserted_text is not None:
+            self.last_inserted_text.argtypes = [C.POINTER(C.c_wchar), W.DWORD]
+            self.last_inserted_text.restype = W.DWORD
+        self.last_original_units = getattr(self.dll, 'LastEditOriginalUnits', None)
+        if self.last_original_units is not None:
+            self.last_original_units.restype = W.DWORD
         logger.debug('TSF編集DLL: path=%s / protocol=101 / detailed_diagnostics=%s',
                      path.resolve(), self.last_diagnostic is not None)
         self.tid, self.started = tid, False
@@ -126,6 +133,14 @@ class NativeEditProbe:
             text_diff = ({name: getattr(diff, name) for name, _ in TextDiff._fields_}
                          if result.state == 3 and self.last_text_diff is not None
                          and self.last_text_diff(C.byref(diff)) else None)
+            if text_diff is not None and self.last_inserted_text is not None:
+                inserted = C.create_unicode_buffer(17)
+                count = self.last_inserted_text(inserted, 17)
+                raw = C.string_at(C.addressof(inserted), min(count, 16) * C.sizeof(C.c_wchar))
+                text_diff['inserted_utf16'] = ','.join(f'{int.from_bytes(raw[i:i+2], "little"):04x}'
+                                                     for i in range(0, len(raw), 2))
+            if text_diff is not None and self.last_original_units is not None:
+                text_diff['original_units'] = self.last_original_units()
             return {"hr": result.hr, "mutated": bool(result.mutated), "state": result.state,
                     "success": result.hr == 0 and result.state == 3,
                     "diagnostic": self.last_diagnostic() if self.last_diagnostic is not None and result.state == 3 else 0,
@@ -194,6 +209,10 @@ def apply_commit(probe, event, captured, result, target=None):
                    f" changed_span={diff['prefix']}:{diff['before'] - diff['suffix']}"
                    f"->{diff['prefix']}:{diff['after'] - diff['suffix']}"
                    f" source_equal={ {0: 'False', 1: 'True', 2: 'unknown'}.get(diff['source_equal'], 'unknown') }")
+        if 'inserted_utf16' in diff:
+            reason += f" inserted_utf16={diff['inserted_utf16'] or 'none'}"
+        if 'original_units' in diff:
+            reason += f" original_units={diff['original_units']}"
     logger.debug('TSF直接編集: commit=%s revision=%s / hr=0x%08x mutated=%s state=%s / %.3fms',
                  event['commit_id'], event['revision'], reply['hr'], reply['mutated'],
                  reply['state'], (time.perf_counter() - started) * 1000)

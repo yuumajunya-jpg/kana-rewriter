@@ -54,7 +54,29 @@ class NativeEditTests(unittest.TestCase):
                     self.assertEqual(reply['text_diff']['before'], 7)
                     if operation == 'changecontext':
                         self.assertEqual(reply['text_diff'], dict(before=7, after=7, prefix=0,
-                                                                suffix=6, source_equal=1))
+                            suffix=6, source_equal=1, inserted_utf16='5225', original_units=3))
+            finally:
+                self.assertTrue(probe.close())
+
+    def test_prefix_insertion_records_actual_units_without_writing(self):
+        with EditFixture() as fixture:
+            probe = NativeEditProbe(fixture.tid).start()
+            try:
+                self.events(probe, lambda es: any(e['kind'] == 2 for e in es))
+                for operation, units in (('insertlinebefore', '000d,000a'),
+                                         ('insertlettersbefore', '8ffd,52a0')):
+                    for repetition in range(25):
+                        with self.subTest(operation=operation, repetition=repetition):
+                            fixture.command('paragraph'); probe.drain()
+                            fixture.command('begin'); fixture.command('commitcaret')
+                            event = next(e for e in self.events(probe, lambda es: any(e['kind'] == 4 for e in es))
+                                         if e['kind'] == 4)
+                            fixture.command(operation)
+                            reply = probe.replace(event, 'さんぽ', '書かない')
+                            self.assertFalse(reply['success'])
+                            self.assertFalse(reply['mutated'])
+                            self.assertEqual(reply['text_diff'], dict(before=7, after=9, prefix=4,
+                                suffix=3, source_equal=0, inserted_utf16=units, original_units=3))
             finally:
                 self.assertTrue(probe.close())
 

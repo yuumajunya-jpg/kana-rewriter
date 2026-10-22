@@ -31,6 +31,9 @@ struct Shared {
     DWORD result, mutated;
     DWORD diagnostic;
     TextDiff text_diff;
+    wchar_t inserted_text[17];
+    DWORD inserted_count;
+    DWORD original_units;
     wchar_t expected[text_limit], replacement[text_limit];
 };
 enum Kind { Attached=1, Context=2, Editing=3, Candidate=4, EmptyEnd=5,
@@ -94,6 +97,8 @@ public:
     std::wstring committed_document;
     bool document_snapshot_valid=false;
     TextDiff last_text_diff{};
+    std::wstring last_inserted_text;
+    DWORD last_original_units=0;
     TF_SELECTIONSTYLE committed_style{};
     HWND committed_focus=nullptr;
     ULONGLONG commit_id=0, edit_revision=0;
@@ -150,6 +155,8 @@ public:
                 last_text_diff={static_cast<DWORD>(committed_document.size()),static_cast<DWORD>(document.size()),
                     static_cast<DWORD>(prefix),static_cast<DWORD>(suffix),
                     FAILED(read_hr)?2u:std::wstring(source,length)==committed_text?1u:0u};
+                last_inserted_text=document.substr(prefix,std::min<size_t>(16,document.size()-prefix-suffix));
+                last_original_units=static_cast<DWORD>(committed_text.size());
                 last_invalidation=TextInvalidation; return false;
             }
         }
@@ -408,6 +415,8 @@ public:
             committed_text.assign(buffer,count);
             document_snapshot_valid=read_document(cookie,committed_document);
             last_text_diff={};
+            last_inserted_text.clear();
+            last_original_units=0;
             committed_focus=GetFocus();
             ++commit_id;
             emit(Candidate,S_OK,std::wstring(buffer,count),0,old.started);
@@ -440,6 +449,12 @@ public:
     HRESULT replace(TfEditCookie cookie) {
         auto reject=[&](DWORD reason,HRESULT hr=HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH)) {
             owner->shared->text_diff=owner->last_invalidation==TextInvalidation?owner->last_text_diff:TextDiff{};
+            if (owner->last_invalidation==TextInvalidation) {
+                std::fill_n(owner->shared->inserted_text,17,L'\0');
+                std::copy(owner->last_inserted_text.begin(),owner->last_inserted_text.end(),owner->shared->inserted_text);
+                owner->shared->inserted_count=static_cast<DWORD>(owner->last_inserted_text.size());
+                owner->shared->original_units=owner->last_original_units;
+            }
             owner->shared->diagnostic=reason|(owner->last_invalidation<<16); return hr;
         };
         if (owner->stopping()) return reject(Stopped);
@@ -612,6 +627,14 @@ extern "C" __declspec(dllexport) BOOL WINAPI LastEditTextDiff(TextDiff* value) {
     if (!host_shared || !value || !host_shared->text_diff.before) return FALSE;
     *value=host_shared->text_diff; return TRUE;
 }
+extern "C" __declspec(dllexport) DWORD WINAPI LastEditInsertedText(wchar_t* value,DWORD capacity) {
+    if (!host_shared || !value || capacity<17) return 0;
+    std::copy_n(host_shared->inserted_text,17,value);
+    return host_shared->inserted_count;
+}
+extern "C" __declspec(dllexport) DWORD WINAPI LastEditOriginalUnits() {
+    return host_shared?host_shared->original_units:0;
+}
 extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULONGLONG revision,
         const wchar_t* expected,const wchar_t* replacement,DWORD timeout,EditResult* result) {
     if (!host_shared || host_poisoned || !expected || !replacement || !result || !timeout ||
@@ -627,6 +650,9 @@ extern "C" __declspec(dllexport) BOOL WINAPI ReplaceCommit(ULONGLONG commit,ULON
     wcscpy_s(host_shared->expected,text_limit,expected); wcscpy_s(host_shared->replacement,text_limit,replacement);
     host_shared->result=E_PENDING; host_shared->mutated=0; host_shared->diagnostic=0;
     host_shared->text_diff={};
+    std::fill_n(host_shared->inserted_text,17,L'\0');
+    host_shared->inserted_count=0;
+    host_shared->original_units=0;
     MemoryBarrier(); InterlockedExchange(&host_shared->edit_state,1);
     if (!host_shared->control_hwnd || !PostMessageW(reinterpret_cast<HWND>(host_shared->control_hwnd),WM_APP+2,0,0)) {
         InterlockedExchange(&host_shared->edit_state,4); SetLastError(ERROR_NOT_READY); return FALSE;
