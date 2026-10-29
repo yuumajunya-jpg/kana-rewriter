@@ -57,6 +57,68 @@ model_format = "jinen_v2"
 
 xsmallとsmallで入力形式は同じです。これまでの速度計測はxsmallで行っているため、smallの速度・精度は同じ結果とは限りません。
 
+### zenz-v3.2-xsmallを使う場合
+
+jinen-v2-xsmallの変換結果が合わない場合の代替として、左右の文脈を使う**zenz-v3.2-xsmall / Q5_K_M（20,970,304 bytes、約21.0MB）**を利用できます。入力形式は`model_format = "zenz_v3_2"`で対応済みです。
+
+zenzのGGUFは`tokenizer.ggml.pre = gpt2-small-japanese-char`を持っており、pipで入る`llama-cpp-python`（上流llama.cpp）では読み込めません。このため、azooKeyのllama.cppフォークをビルドし、`llama-server`をローカルHTTPサーバーとして起動して、`backend = "http"`で接続します。`llama-cpp-python`への組み込みは行いません。
+
+モデルを取得し、ハッシュを確認します。
+
+```cmd
+.\.venv\Scripts\hf.exe download Miwa-Keita/zenz-v3.2-xsmall-gguf ggml-model-Q5_K_M.gguf --revision 4f5423f0fad41a73b1242eb96fe5c12ae4fdca83 --local-dir models/zenz-v3.2-xsmall
+certutil -hashfile models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf SHA256
+```
+
+確認済みSHA256: `00c64b3d318045a708d0cad5434faccab10f5481a49e6362864551fd0995fa58`。[配布元](https://huggingface.co/Miwa-Keita/zenz-v3.2-xsmall-gguf)の固定コミット`4f5423f0fad41a73b1242eb96fe5c12ae4fdca83`のファイルと一致しています。
+
+Git、CMake、Visual Studioの「C++によるデスクトップ開発」（またはBuild Tools）を用意し、PowerShellでフォークをビルドします。ビルドには数分かかります。
+
+```powershell
+git clone --depth 1 https://github.com/azooKey/llama.cpp.git build\zenz-llama.cpp
+git -C build\zenz-llama.cpp rev-parse HEAD
+cmake -S build\zenz-llama.cpp -B build\zenz-llama.cpp\build -A x64
+cmake --build build\zenz-llama.cpp\build --config Release --target llama-server --parallel 8
+```
+
+2行目の結果が`88b97a47dc7f5892e2d5a6856fbe9cfe237f9e5c`（確認時のフォーク先頭）であることを確認してください。異なる場合は、同じコミットを指定してからビルドします。
+
+```powershell
+git -C build\zenz-llama.cpp fetch --depth 1 origin 88b97a47dc7f5892e2d5a6856fbe9cfe237f9e5c
+git -C build\zenz-llama.cpp checkout FETCH_HEAD
+```
+
+アプリを起動する前に、別のPowerShellウィンドウでサーバーを起動します。`server is listening`とモデル読込の完了を確認し、そのまま開いておきます。
+
+```powershell
+.\build\zenz-llama.cpp\build\bin\Release\llama-server.exe -m models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf --host 127.0.0.1 --port 8080 -c 1024
+```
+
+`config.toml`は次の4項目に変更します。`model_format`は必ず`zenz_v3_2`にしてください。
+
+```toml
+backend = "http"
+endpoint = "http://127.0.0.1:8080/v1/completions"
+model = "local"
+model_format = "zenz_v3_2"
+```
+
+`backend = "http"`では`model_path`、`n_ctx`、`n_gpu_layers`は使われません。コンテキスト長はサーバーの`-c`、GPUを使う場合はGPU対応でビルドしたサーバーの`-ngl`で指定します。サーバーは`127.0.0.1`だけに待ち受け、外部へ公開しないでください。
+
+変換の確認:
+
+```cmd
+.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --text "はいしゃ" --left-context "歯が痛いので、"
+```
+
+`歯医者`が返れば接続できています。通常の起動はこれまでと同じです。
+
+```cmd
+.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --editor-worker python
+```
+
+サーバーを停止した状態で変換すると接続エラーになります。アプリより先にサーバーを起動し、終了時はサーバー側でCtrl+Cを押します。`llama-cpp-python`はこの経路では使いませんが、セットアップ手順で導入済みでも動作に影響しません。
+
 ## 動作確認と起動
 
 入力欄を操作せずに変換を確認します。以下は文脈による変換を確認するための入力例です。出力はモデル・設定により変わります。

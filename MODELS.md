@@ -40,19 +40,26 @@ zenz-v3.2-smallの公開GGUFヘッダーで、`gpt2.context_length=1024`、`toke
 
 調査時の上流llama.cppには`gpt2-small-japanese-char`が見当たらず、AzooKeyKanaKanjiConverterはazooKeyのllama.cppフォークを使用しています。Hugging Faceの自動生成される利用例だけを根拠に、通常のpip版で動くと判断しないでください。
 
-zenzを使う場合、このpre-tokenizerに対応したllama.cppを組み込むPythonランタイムが必要です。メタデータだけを汎用gpt2に書き換える方法は、文字のトークン化が変わるため採用していません。フォーク版Python wheelのビルド・互換性確認は未実装です。
+zenzを使う場合、このpre-tokenizerに対応したllama.cppが必要です。メタデータだけを汎用gpt2に書き換える方法は、文字のトークン化が変わるため採用していません。
 
-入力形式は`model_format = "zenz_v3_2"`で対応済みです。対応ランタイムを用意した場合のモデル取得:
+このリポジトリでは、azooKeyのllama.cppフォークの`llama-server`をローカルHTTPサーバーとして起動し、`backend = "http"` / `model_format = "zenz_v3_2"`で接続する経路をWindows/Python 3.11で確認した（2026-10-29）。zenz-v3.2-xsmallのQ5_K_Mで、左文脈「歯が痛いので、」と読み「はいしゃ」から「歯医者」への変換を確認している。フォーク版Python wheelのビルドは不要で、`llama-cpp-python`からGGUFを直接読み込む経路は使用しない。ビルドと起動の手順は[READMEのzenz-v3.2-xsmallの節](README.md#zenz-v32-xsmallを使う場合)を参照。
+
+入力形式は`model_format = "zenz_v3_2"`で対応済みです。モデル取得:
 
 ```powershell
-.\.venv\Scripts\hf.exe download Miwa-Keita/zenz-v3.2-small-gguf ggml-model-Q5_K_M.gguf --local-dir models/zenz-v3.2-small
+.\.venv\Scripts\hf.exe download Miwa-Keita/zenz-v3.2-xsmall-gguf ggml-model-Q5_K_M.gguf --revision 4f5423f0fad41a73b1242eb96fe5c12ae4fdca83 --local-dir models/zenz-v3.2-xsmall
 ```
 
+SHA256: `00c64b3d318045a708d0cad5434faccab10f5481a49e6362864551fd0995fa58`。
+
 ```toml
-model_path = "models/zenz-v3.2-small/ggml-model-Q5_K_M.gguf"
+backend = "http"
+endpoint = "http://127.0.0.1:8080/v1/completions"
+model = "local"
 model_format = "zenz_v3_2"
-n_ctx = 0
 ```
+
+`zenz-v3.2-small`も同じ経路で利用できますが、このリポジトリの確認はxsmallで行っています。Q5_K_Mのファイルは`Miwa-Keita/zenz-v3.2-small-gguf`の`ggml-model-Q5_K_M.gguf`です。
 
 ## 入力形式と対象範囲
 
