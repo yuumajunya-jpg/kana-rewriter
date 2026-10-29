@@ -2,7 +2,7 @@
 
 このZIPは、C++のビルド環境がないWindows PCで使うための配布版です。アプリ本体（Pythonソース）と、ビルド済みのTSF監視DLL・TSF編集DLLを同梱しています。Python本体と依存パッケージは含みません。
 
-モデル同梱版では、既定のjinen-v2-xsmallと、その出典・ライセンスを記載した`MODEL_LICENSES.md`が入っています。その場合、`config.toml`は設定済みなので**手順4を飛ばして手順5以降へ進んでください**。
+モデル同梱版では、**zenz-v3.2-xsmall**と、その出典・ライセンスを記載した`MODEL_LICENSES.md`が入っています。`config.toml`も設定済みなので、**手順4を飛ばして手順5以降へ進んでください**。zenzの直接読み込みには`kv_overrides`に対応した`llama-cpp-python`が必要です（0.3.36で確認）。
 
 対象は **Windows 10/11 の64ビット版** です。ARM64ネイティブ版はありません。
 
@@ -68,7 +68,7 @@ py -3 -c "import llama_cpp, comtypes; print('依存パッケージOK')"
 
 ### 手順4: モデルを置く
 
-**モデル同梱版ではこの手順は不要です。** `models`に既定のjinen-v2-xsmallが入り、`config.toml`も設定済みです。手順5の確認だけ行ってください。
+**モデル同梱版ではこの手順は不要です。** `models\zenz-v3.2-xsmall`にモデルが入り、`config.toml`も`model_format = "zenz_v3_2"`で設定済みです。手順5の確認だけ行ってください。
 
 モデルなし版では、`models`フォルダーへGGUFを置きます。**既定は jinen-v2-xsmall** です。取得するファイル名・固定リビジョン・SHA256は、リポジトリ直下のREADMEと同じです。ただしZIPには`huggingface_hub`を同梱していないため、ここではWindows標準の`curl.exe`を使います。
 
@@ -109,18 +109,18 @@ zenzのGGUFは、azooKeyのllama.cppフォーク固有のpre-tokenizer名を持�
 
 最低限、`model_path`と`model_format`の2行をモデルに合わせます。`model_path`は`config.toml`からの相対パス、または絶対パスです。**モデル同梱版は設定済みなので、この手順は確認だけで構いません。**
 
-jinen-v2-xsmall（既定・同梱版）:
-
-```toml
-model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
-model_format = "jinen_v2"
-```
-
-zenz-v3.2-xsmall:
+zenz-v3.2-xsmall（同梱版）:
 
 ```toml
 model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
 model_format = "zenz_v3_2"
+```
+
+jinen-v2-xsmall（モデルなし版の既定）:
+
+```toml
+model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
+model_format = "jinen_v2"
 ```
 
 `model_format`を間違えると、読み込みは成功しても変換結果が崩れます。モデルと形式は必ず組み合わせてください。
@@ -155,7 +155,7 @@ start.cmd
 start.cmd --text "はいしゃ" --left-context "歯が痛いので、"
 ```
 
-zenzなら`歯医者`と表示されます。jinenでも同じ読みなら通常は`歯医者`になります。モデル読込エラーになる場合は、手順4と5のパス・形式・SHA256を確認してください。
+同梱版（zenz-v3.2-xsmall）なら`歯医者`と表示されます。jinenでも同じ読みなら通常は`歯医者`になります。モデル読込エラーになる場合は、手順4と5のパス・形式・SHA256を確認してください。
 
 常駐起動後は、入力欄でひらがなを確定し、カーソルを読みの直後に置いて`Ctrl+Enter`を押すと、カーソル左の区切りまでを変換します。選択範囲は`Ctrl+Shift+Enter`です。日本語キーボードでは`半角/全角`と`Shift+半角/全角`も使えます（`config.toml`で変更）。
 

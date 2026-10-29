@@ -29,13 +29,19 @@ def tsf_artifact(directory, source, build_script):
     return manifest, dll, dll_name
 
 
-def package(output, model):
+def package(output, model, model_format=None, model_name=None):
     if sys.platform != "win32" or struct.calcsize("P") != 8 or sys.implementation.name != "cpython":
         raise RuntimeError("Run with 64-bit Windows CPython from the working environment")
     artifacts = [tsf_artifact("tsf-probe", "tsf_probe.cpp", "build_tsf_probe.ps1"),
                  tsf_artifact("tsf-edit-probe", "tsf_edit_probe.cpp", "build_tsf_edit_probe.ps1")]
     if model and not model.is_file():
         raise FileNotFoundError(model)
+    if model_format and model_format not in {"jinen_v1", "jinen_v2", "zenz_v3_2", "chat"}:
+        raise ValueError(f"Unsupported model format: {model_format}")
+    if model_name:
+        chosen = Path(model_name)
+        if chosen.is_absolute() or ".." in chosen.parts or chosen.suffix != ".gguf":
+            raise ValueError("Bundled model name must be a relative .gguf path")
     staging = (ROOT / "build").resolve()
     staging.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="kana-package-", dir=staging) as temporary:
@@ -54,14 +60,21 @@ def package(output, model):
             shutil.copy2(manifest, target / "latest.json")
         (bundle / "models").mkdir()
         if model:
-            shutil.copy2(model, bundle / "models" / model.name)
+            name = model_name or model.name
+            target = bundle / "models" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(model, target)
             config = (bundle / "config.toml").read_text(encoding="utf-8")
             config = re.sub(r'^model_path\s*=.*$',
-                            lambda _: 'model_path = ' + json.dumps("models/" + model.name, ensure_ascii=False),
+                            lambda _: 'model_path = ' + json.dumps("models/" + name.replace("\\", "/"),
+                                                                   ensure_ascii=False),
                             config, flags=re.MULTILINE)
-            # Match the reference model used by the normal setup instructions.
-            if model.name.startswith("jinen-v2-"):
-                config = re.sub(r'^model_format\s*=.*$', 'model_format = "jinen_v2"',
+            chosen_format = model_format
+            if chosen_format is None and name.startswith("jinen-v2-"):
+                chosen_format = "jinen_v2"
+            if chosen_format is not None:
+                config = re.sub(r'^model_format\s*=.*$',
+                                'model_format = ' + json.dumps(chosen_format),
                                 config, flags=re.MULTILINE)
             (bundle / "config.toml").write_text(config, encoding="utf-8")
         (bundle / "launch.py").write_text(
@@ -107,5 +120,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "dist/kana-rewriter-windows-x64.zip")
     parser.add_argument("--model", type=Path, help="Optional GGUF; confirm redistribution rights before sharing")
+    parser.add_argument("--model-format", help="model_format to write when bundling a model")
+    parser.add_argument("--model-name", help="Relative path for the bundled model inside models/")
     args = parser.parse_args()
-    package(args.output.resolve(), args.model.resolve() if args.model else None)
+    package(args.output.resolve(), args.model.resolve() if args.model else None,
+            args.model_format, args.model_name)
