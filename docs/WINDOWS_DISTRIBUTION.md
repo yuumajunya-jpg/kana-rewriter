@@ -1,6 +1,8 @@
 # kana-rewriter Windows配布版（ZIP）の使い方
 
-このZIPは、C++のビルド環境がないWindows PCで使うための配布版です。アプリ本体（Pythonソース）と、ビルド済みのTSF監視DLL・TSF編集DLLを同梱しています。Python本体・依存パッケージ・モデルは含みません。
+このZIPは、C++のビルド環境がないWindows PCで使うための配布版です。アプリ本体（Pythonソース）と、ビルド済みのTSF監視DLL・TSF編集DLLを同梱しています。Python本体と依存パッケージは含みません。
+
+モデル同梱版では、既定のjinen-v2-xsmallと、その出典・ライセンスを記載した`MODEL_LICENSES.md`が入っています。その場合、`config.toml`は設定済みなので**手順4を飛ばして手順5以降へ進んでください**。
 
 対象は **Windows 10/11 の64ビット版** です。ARM64ネイティブ版はありません。
 
@@ -12,20 +14,21 @@ kana-rewriter\
   launch.py                 Pythonの入口
   config.toml               設定ファイル（最初から入っています）
   README.md                 このファイル
+  MODEL_LICENSES.md         同梱モデルの出典とライセンス（モデル同梱版のみ）
   bundle-manifest.json      同梱ファイルのSHA256一覧
   kana_rewriter\            アプリ本体
   build\tsf-probe\          監視用DLL
   build\tsf-edit-probe\     編集用DLL
-  models\                   空。ここにGGUFモデルを置きます
+  models\                   GGUFモデル（同梱版では設定済みのモデルが入っています）
 ```
 
-同梱しないもの: Python本体、`llama-cpp-python`、`comtypes`、GGUFモデル、GPU推論用ランタイム。
+同梱しないもの: Python本体、`llama-cpp-python`、`comtypes`、GPU推論用ランタイム。モデル同梱版以外はGGUFモデルも含みません。
 
 ## 2. 必要なもの
 
 - Windows 10/11（64ビット）
 - 64ビットのPython 3.11以上
-- GGUFモデル（次の手順で取得します）
+- GGUFモデル（モデル同梱版には入っています。それ以外は手順4で取得します）
 
 ## 3. セットアップ手順
 
@@ -65,7 +68,9 @@ py -3 -c "import llama_cpp, comtypes; print('依存パッケージOK')"
 
 ### 手順4: モデルを置く
 
-`models`フォルダーへGGUFを置きます。**既定は jinen-v2-xsmall** です。
+**モデル同梱版ではこの手順は不要です。** `models`に既定のjinen-v2-xsmallが入り、`config.toml`も設定済みです。手順5の確認だけ行ってください。
+
+モデルなし版では、`models`フォルダーへGGUFを置きます。**既定は jinen-v2-xsmall** です。取得するファイル名・固定リビジョン・SHA256は、リポジトリ直下のREADMEと同じです。ただしZIPには`huggingface_hub`を同梱していないため、ここではWindows標準の`curl.exe`を使います。
 
 ```cmd
 curl.exe -L --fail -o models\jinen-v2-xsmall-Q5_K_M.gguf https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/resolve/b91eac974998a37423ca8a1198fd7c5631b06e57/jinen-v2-xsmall-Q5_K_M.gguf
@@ -78,15 +83,16 @@ SHA256が次と一致することを確認します。
 24ff3af5db712fbbb4aa9254ee28ec4d731207134471ab68b06c1828726284c2
 ```
 
-`certutil`の表示は大文字・空白区切りですが、同じ値です。
+`certutil`の表示は大文字・空白区切りですが、同じ値です。`huggingface_hub`を別途入れている場合は、READMEと同じ`hf.exe`のコマンドでも同じファイルを取得できます。
 
 #### zenz-v3.2-xsmallを使う場合
 
-左右の文脈を使う代替モデルです。jinenと同じ場所に置き、`config.toml`の`model_format`だけを変えます。
+左右の文脈を使う代替モデルです。**保存先のフォルダーとファイル名はREADMEと同じ**`models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf`にします。
 
 ```cmd
-curl.exe -L --fail -o models\zenz-v3.2-xsmall-Q5_K_M.gguf https://huggingface.co/Miwa-Keita/zenz-v3.2-xsmall-gguf/resolve/4f5423f0fad41a73b1242eb96fe5c12ae4fdca83/ggml-model-Q5_K_M.gguf
-certutil -hashfile models\zenz-v3.2-xsmall-Q5_K_M.gguf SHA256
+mkdir models\zenz-v3.2-xsmall 2>nul
+curl.exe -L --fail -o models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf https://huggingface.co/Miwa-Keita/zenz-v3.2-xsmall-gguf/resolve/4f5423f0fad41a73b1242eb96fe5c12ae4fdca83/ggml-model-Q5_K_M.gguf
+certutil -hashfile models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf SHA256
 ```
 
 SHA256が次と一致することを確認します。
@@ -101,9 +107,9 @@ zenzのGGUFは、azooKeyのllama.cppフォーク固有のpre-tokenizer名を持�
 
 ### 手順5: `config.toml`を設定する
 
-最低限、`model_path`と`model_format`の2行をモデルに合わせます。`model_path`は`config.toml`からの相対パス、または絶対パスです。
+最低限、`model_path`と`model_format`の2行をモデルに合わせます。`model_path`は`config.toml`からの相対パス、または絶対パスです。**モデル同梱版は設定済みなので、この手順は確認だけで構いません。**
 
-jinen-v2-xsmall（既定）:
+jinen-v2-xsmall（既定・同梱版）:
 
 ```toml
 model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
@@ -113,7 +119,7 @@ model_format = "jinen_v2"
 zenz-v3.2-xsmall:
 
 ```toml
-model_path = "models/zenz-v3.2-xsmall-Q5_K_M.gguf"
+model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
 model_format = "zenz_v3_2"
 ```
 

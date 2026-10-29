@@ -32,8 +32,8 @@ n_gpu_layers = 0 # CPU。GPU対応版を入れた場合は -1 で全層をGPUへ
 # jinen v1を使う場合はmodel_pathとmodel_formatを両方変更:
 # model_path = "models/jinen-v1-xsmall-Q5_K_M.gguf"
 # model_format = "jinen_v1"
-# zenz-v3.2-xsmallを使う場合: model_pathを公式GGUF、model_format = "zenz_v3_2"。
-# pre-tokenizer名は読込時にアプリが上書きする。サーバー経由はREADME参照
+# zenz-v3.2-xsmallを使う場合: model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"、
+# model_format = "zenz_v3_2"。pre-tokenizer名は読込時にアプリが上書きする
 # chat_format = "chatml" # chatの場合のみ
 
 # 任意: backend = "http" にすると外部のローカルサーバーを使用

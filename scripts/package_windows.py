@@ -46,6 +46,7 @@ def package(output, model):
         shutil.copytree(ROOT / "kana_rewriter", bundle / "kana_rewriter", ignore=ignore)
         shutil.copy2(ROOT / "config.example.toml", bundle / "config.toml")
         shutil.copy2(ROOT / "docs/WINDOWS_DISTRIBUTION.md", bundle / "README.md")
+        shutil.copy2(ROOT / "docs/MODEL_LICENSES.md", bundle / "MODEL_LICENSES.md")
         for manifest, dll, dll_name in artifacts:
             target = bundle / "build" / manifest.parent.name
             target.mkdir(parents=True)
