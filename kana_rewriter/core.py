@@ -155,11 +155,15 @@ class Converter:
         except ImportError as exc:
             raise RuntimeError('llama-cpp-pythonが必要です: pip install -e ".[local]"') from exc
         try:
+            overrides = ({"tokenizer.ggml.pre": "gpt-2"}
+                         if self.config.model_format == "zenz_v3_2" else None)
             self.llm = Llama(model_path=self.config.model_path, n_ctx=self.config.n_ctx,
                              n_gpu_layers=self.config.n_gpu_layers,
-                             chat_format=self.config.chat_format, verbose=False)
-        except ValueError as exc:
-            hint = (" zenz系の公式GGUFには独自トークナイザー対応のランタイムが必要です。"
+                             chat_format=self.config.chat_format,
+                             kv_overrides=overrides, verbose=False)
+        except (ValueError, TypeError) as exc:
+            hint = (" zenz系の公式GGUFは独自のpre-tokenizer名を持ちます。"
+                    "古いllama-cpp-pythonでは読み込めないため、更新するかREADMEのサーバー経由を使用してください。"
                     if self.config.model_format == "zenz_v3_2" else "")
             raise RuntimeError("GGUFの読み込みに失敗しました。パスとランタイムの対応を確認してください。" + hint) from exc
 

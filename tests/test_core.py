@@ -81,6 +81,15 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(model.create_chat_completion.call_args.kwargs["messages"][1]["content"],
                                  "きょうはいいてんきです")
 
+    def test_zenz_model_overrides_pre_tokenizer(self):
+        with tempfile.NamedTemporaryFile(suffix=".gguf") as file:
+            module = Mock()
+            module.Llama.return_value = Mock()
+            with patch.dict("sys.modules", {"llama_cpp": module}):
+                Converter(Config(model_path=file.name, model_format="zenz_v3_2")).load_model()
+            self.assertEqual(module.Llama.call_args.kwargs["kv_overrides"],
+                             {"tokenizer.ggml.pre": "gpt-2"})
+
     def test_missing_model(self):
         with self.assertRaisesRegex(ValueError, "GGUF"):
             Converter(Config(model_path="missing-model.gguf")).load_model()

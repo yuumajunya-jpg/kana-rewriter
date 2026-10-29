@@ -40,9 +40,7 @@ zenz-v3.2-smallの公開GGUFヘッダーで、`gpt2.context_length=1024`、`toke
 
 調査時の上流llama.cppには`gpt2-small-japanese-char`が見当たらず、AzooKeyKanaKanjiConverterはazooKeyのllama.cppフォークを使用しています。Hugging Faceの自動生成される利用例だけを根拠に、通常のpip版で動くと判断しないでください。
 
-zenzを使う場合、このpre-tokenizerに対応したllama.cppが必要です。メタデータだけを汎用gpt2に書き換える方法は、文字のトークン化が変わるため採用していません。
-
-このリポジトリでは、azooKeyのllama.cppフォークの`llama-server`をローカルHTTPサーバーとして起動し、`backend = "http"` / `model_format = "zenz_v3_2"`で接続する経路をWindows/Python 3.11で確認した（2026-10-29）。zenz-v3.2-xsmallのQ5_K_Mで、左文脈「歯が痛いので、」と読み「はいしゃ」から「歯医者」への変換を確認している。フォーク版Python wheelのビルドは不要で、`llama-cpp-python`からGGUFを直接読み込む経路は使用しない。ビルドと起動の手順は[READMEのzenz-v3.2-xsmallの節](README.md#zenz-v32-xsmallを使う場合)を参照。
+zenzを使う場合、このpre-tokenizerに対応したllama.cppが必要です。azooKeyのフォークは`gpt2-small-japanese-char`をGPT-2と同じ正規表現に割り当てているため、読み込み時だけ`tokenizer.ggml.pre`を`gpt-2`へ上書きすると、トークン化を変えずに上流llama.cppでも扱えます。このリポジトリでは`model_format = "zenz_v3_2"`のとき`kv_overrides`で上書きする経路をWindows/Python 3.11、`llama-cpp-python 0.3.36`で確認した（2026-10-29）。GGUFファイルは変更しない。zenz-v3.2-xsmallのQ5_K_Mで、左文脈「歯が痛いので、」と読み「はいしゃ」から「歯医者」への変換を確認している。
 
 入力形式は`model_format = "zenz_v3_2"`で対応済みです。モデル取得:
 
@@ -51,6 +49,16 @@ zenzを使う場合、このpre-tokenizerに対応したllama.cppが必要です
 ```
 
 SHA256: `00c64b3d318045a708d0cad5434faccab10f5481a49e6362864551fd0995fa58`。
+
+直接読み込む場合は、公式GGUFをそのまま指定します。pre-tokenizer名の上書きはアプリが行います。
+
+```toml
+backend = "llama_cpp"
+model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
+model_format = "zenz_v3_2"
+```
+
+azooKeyのllama.cppフォークの`llama-server`を使う場合は、公式GGUFのまま`backend = "http"`で接続します。ビルド済みバイナリの入手と起動の手順は[READMEのzenz-v3.2-xsmallの節](README.md#zenz-v32-xsmallを使う場合)を参照してください。
 
 ```toml
 backend = "http"
