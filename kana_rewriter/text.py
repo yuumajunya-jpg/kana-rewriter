@@ -16,6 +16,11 @@ def is_kanji(character: str) -> bool:
     return name.startswith(("CJK UNIFIED IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-")) or character in "々〆〇"
 
 
+def is_katakana(character: str) -> bool:
+    name = unicodedata.name(character, "")
+    return "KATAKANA" in name
+
+
 def reading_spans(text: str):
     """Split a mixed selection into contiguous kana spans without morphology."""
     start = None
@@ -54,7 +59,7 @@ def split_at_caret(text: str, caret: int, conversion_delimiters: str = "。",
     while start > 0:
         character = text[start - 1]
         if (character in conversion_delimiters or character in "\r\n"
-                or (stop_at_kanji and is_kanji(character))):
+                or (stop_at_kanji and (is_kanji(character) or is_katakana(character)))):
             break
         start -= 1
     if not any(reading_spans(text[start:end])):

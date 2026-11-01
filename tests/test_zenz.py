@@ -14,14 +14,26 @@ class ZenzTests(unittest.TestCase):
         self.assertEqual(region.rebuild("いので、歯医者"), "歯が痛いので、歯医者に行く")
 
     def test_scan_stops_at_boundaries(self):
-        for boundary in ("。", "漢", "𠮷", "々", "\n"):
+        for boundary in ("。", "漢", "𠮷", "々", "カ", "ｶ", "ヽ", "ヾ", "ー", "ㇰ", "\n"):
             line = "まえ" + boundary + "きょう"
             self.assertEqual(split_at_caret(line, len(line)).target, "きょう")
 
-    def test_default_boundary_is_only_kanji_and_period(self):
-        for middle in ("、", "?", "!", " ", "A", "カ"):
+    def test_default_boundary_preserves_other_characters(self):
+        for middle in ("、", "?", "!", " ", "A"):
             line = "前。まえ" + middle + "きょう"
             self.assertEqual(split_at_caret(line, len(line)).target, "まえ" + middle + "きょう")
+
+    def test_katakana_stays_in_left_context(self):
+        for word in ("コーヒー", "ｺｰﾋｰ", "カ\u3099"):
+            line = "まえ" + word + "をのむ。"
+            region = split_at_caret(line, len(line))
+            self.assertEqual(region, TextRegion("まえ" + word, "をのむ", "。"))
+            self.assertEqual(region.rebuild("を飲む"), "まえ" + word + "を飲む。")
+
+    def test_katakana_at_caret_has_no_target(self):
+        for line in ("コーヒー", "まえカ。", "ｺｰﾋｰ"):
+            with self.assertRaises(ValueError):
+                split_at_caret(line, len(line))
 
     def test_configured_boundaries_and_trailing_characters_are_independent(self):
         line = "前。まえ、きょう?"
