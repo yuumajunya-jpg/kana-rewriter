@@ -205,6 +205,7 @@ ime_commit_backend = "tsf"
 ```powershell
 .\scripts\build_tsf_probe.ps1
 .\scripts\build_tsf_edit_probe.ps1
+.\scripts\build_preview.ps1
 .\.venv\Scripts\python.exe scripts/package_windows.py
 ```
 

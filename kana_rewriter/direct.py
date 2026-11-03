@@ -90,10 +90,12 @@ class EditorEngine:
         return capture
 
     def focus_runtime(self):
+        from .direct_uia import text_provider
         if self.automation is None:
             from .direct_uia import Automation
             self.automation = Automation()
-        return tuple(self.automation.client.GetFocusedElement().GetRuntimeId())
+        element, _ = text_provider(self.automation, self.automation.client.GetFocusedElement())
+        return tuple(element.GetRuntimeId())
 
     @stage("適用/全体（IME復元を含む）")
     def apply(self, capture, result):

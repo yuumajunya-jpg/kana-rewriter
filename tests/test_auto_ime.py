@@ -58,6 +58,105 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[1].auto_replace_on_ime_commit, not saved)
 
 
+@unittest.skipUnless(sys.platform == 'win32', 'Windows UIA metadata')
+class FocusIdentityTests(unittest.TestCase):
+    def test_child_changes_preserve_document_identity_and_readonly_is_rechecked(self):
+        from kana_rewriter.auto_ime import FocusReader
+        from kana_rewriter.direct import EditorEngine
+        reader = FocusReader.__new__(FocusReader)
+        reader.automation = automation = Mock()
+        reader.checked = 3
+        reader.last_focus = None
+        first, second, owner, pattern, value = Mock(), Mock(), Mock(), Mock(), Mock()
+        first.GetRuntimeId.return_value = (10,)
+        second.GetRuntimeId.return_value = (20,)
+        owner.GetRuntimeId.return_value = (100,)
+        automation.client.GetFocusedElement.side_effect = [first, second, second, second]
+        automation.client.ControlViewWalker.GetParentElement.return_value = owner
+        automation.pattern.side_effect = lambda element, name: (
+            pattern if element is owner and name == 'TextPattern' else
+            value if element is owner and name == 'ValuePattern' else None)
+        pattern.DocumentRange.GetAttributeValue.return_value = False
+        value.CurrentIsReadOnly = False
+        with patch('kana_rewriter.direct_win32.window_identity', return_value=(1, 2, 3)), \
+                patch('kana_rewriter.winapi.user.GetWindowThreadProcessId', return_value=4), \
+                patch('kana_rewriter.direct_uia.property_values', return_value=dict(
+                    IsPassword=False, IsEnabled=True, HasKeyboardFocus=True)):
+            original = reader.read()
+            self.assertEqual(original.runtime, (100,))
+            self.assertEqual(reader.read(), original)
+            engine = EditorEngine(Config())
+            engine.automation = automation
+            self.assertEqual(engine.focus_runtime(), original.runtime)
+            value.CurrentIsReadOnly = True
+            self.assertIsNone(reader.read())
+
+
+class NativeContextStateTests(unittest.TestCase):
+    def state(self):
+        state = CommitState(native_context=True)
+        state.track(FIELD, 1)
+        state.observe([event(2, tick=10)], 10)
+        return state
+
+    def candidate(self, **updates):
+        return event(4, commit_id=1, revision=185, **updates)
+
+    def test_runtime_change_keeps_queued_commit_and_inflight_result(self):
+        state = self.state()
+        state.track(Focus(FIELD.target, (-109666,), FIELD.tid), 110)
+        state.observe([self.candidate()], 110)
+        commit = state.take(110)
+        self.assertIsNotNone(commit)
+        self.assertEqual(state.accept_since, 10)
+        self.assertTrue(state.begin(commit))
+        state.track(FIELD, 120)
+        self.assertTrue(state.valid(commit))
+
+    def test_actual_context_change_on_same_hwnd_invalidates_old_result(self):
+        state = self.state()
+        state.observe([self.candidate()], 100)
+        commit = state.take(100)
+        state.begin(commit)
+        state.observe([event(2, generation=2, tick=110)], 110)
+        self.assertFalse(state.valid(commit))
+        state.finish(120)
+        state.observe([self.candidate(tick=150, composition_tick=130)], 150)
+        self.assertIsNone(state.take(150))
+        state.observe([self.candidate(generation=2, tick=160, composition_tick=130)], 160)
+        self.assertIsNotNone(state.take(160))
+
+    def test_context_after_candidate_in_same_batch_discards_candidate(self):
+        state = self.state()
+        state.observe([self.candidate(), event(2, generation=2, tick=110)], 110)
+        self.assertIsNone(state.take(110))
+
+    def test_context_and_native_range_are_required(self):
+        state = CommitState(native_context=True)
+        state.track(FIELD, 1)
+        state.observe([self.candidate()], 100)
+        self.assertIsNone(state.take(100))
+        state.observe([event(2, tick=10), event(4)], 100)
+        self.assertIsNone(state.take(100))
+
+    def test_real_target_change_loss_and_input_still_reject(self):
+        for change in ('target', 'loss', 'key', 'unavailable'):
+            with self.subTest(change=change):
+                state = self.state()
+                state.observe([self.candidate()], 100)
+                commit = state.take(100)
+                state.begin(commit)
+                if change == 'target':
+                    state.track(Focus((1, 9, 3), FIELD.runtime, FIELD.tid), 110)
+                elif change == 'loss':
+                    state.resync(110)
+                elif change == 'key':
+                    state.observe([event(8, tick=110)], 110)
+                else:
+                    state.track(None, 110)
+                self.assertFalse(state.valid(commit))
+
+
 class StateTests(unittest.TestCase):
     def setUp(self):
         self.state = CommitState()
@@ -266,6 +365,148 @@ class StateTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")
 class WatcherTests(unittest.TestCase):
+    def test_reported_commit_runtime_round_trip_is_not_drained_away(self):
+        reader, probe = Mock(), Mock()
+        probe.start.return_value = probe
+        probe.close.return_value = True
+        probe.dropped.return_value = 0
+        monitor = AutoImeMonitor(Config(ime_commit_backend='tsf'), Mock(),
+                                 reader_factory=lambda: reader, probe_factory=lambda *args: probe)
+        changed = Focus(FIELD.target, (-109666,), FIELD.tid)
+        reader.now.return_value = 1
+        reads, delivered = 0, []
+        def read():
+            nonlocal reads
+            reads += 1
+            reader.now.return_value = [1, 110, 120, 130][reads - 1]
+            if reads == 3:
+                commit = monitor.state.take(120)
+                self.assertIsNotNone(commit)
+                self.assertTrue(monitor.begin(commit))
+                delivered.append(commit)
+            if reads == 4:
+                self.assertTrue(monitor.state.valid(delivered[0]))
+                monitor.stopping.set()
+            return changed if reads == 2 else FIELD
+        reader.read.side_effect = read
+        probe.drain.side_effect = [
+            [event(1, tick=1), event(2, tick=1)],
+            [event(8), event(3), event(4, commit_id=1, revision=185)], [], []]
+        with patch.dict(sys.modules, {'comtypes': Mock()}), \
+                patch.object(monitor.stopping, 'wait', return_value=False):
+            monitor._run()
+        self.assertIsNone(monitor.error)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0].text, 'さんぽ')
+        probe.start.assert_called_once()
+        self.assertEqual(probe.drain.call_count, 4)
+
+    @unittest.skipUnless(probe_path().is_file(), 'Build TSF DLL first')
+    def test_slow_focus_reader_does_not_overflow_native_queue(self):
+        from tests.test_tsf_probe import Fixture
+        pause, blocked, release = threading.Event(), threading.Event(), threading.Event()
+        class Reader:
+            current = None
+            def read(self):
+                if pause.is_set():
+                    blocked.set()
+                    release.wait(5)
+                return self.current
+            def now(self): return tick_count()
+        reader = Reader()
+        with Fixture() as fixture, self.assertLogs('kana_rewriter.auto_ime', level='DEBUG') as logs:
+            reader.current = Focus((fixture.hwnd, 0, fixture.pid), (1,), fixture.tid)
+            monitor = AutoImeMonitor(Config(), Mock(), reader_factory=lambda: reader).start()
+            def wait_log(fragment, count=1):
+                deadline = time.monotonic() + 4
+                while time.monotonic() < deadline:
+                    if sum(fragment in r.getMessage() for r in logs.records[:]) >= count:
+                        return
+                    time.sleep(.01)
+                self.fail(str([r.getMessage() for r in logs.records]))
+            try:
+                wait_log('context pid=')
+                pause.set()
+                self.assertTrue(blocked.wait(2))
+                fixture.command('begin')
+                for _ in range(80):
+                    fixture.command('update')
+                pause.clear()
+                release.set()
+                self.assertFalse(any('監視を再接続' in r.getMessage() for r in logs.records))
+                self.assertIsNone(monitor.error)
+                self.assertTrue(monitor.thread.is_alive())
+                self.assertFalse(monitor.state.closed)
+                fixture.command('cancel')
+                fixture.command('reset')
+                fixture.command('begin')
+                fixture.command('commit')
+                wait_log('commit_candidate pid=')
+                self.assertIsNone(monitor.error)
+            finally:
+                pause.clear()
+                release.set()
+                monitor.close()
+
+    def test_overflow_discards_batch_invalidates_old_edit_and_accepts_next_input(self):
+        reader, old_probe, new_probe = Mock(), Mock(), Mock()
+        reader.now.return_value = 100
+        old_probe.start.return_value = old_probe
+        new_probe.start.return_value = new_probe
+        old_probe.close.return_value = new_probe.close.return_value = True
+        old_probe.dropped.return_value = 7
+        new_probe.dropped.return_value = 0
+        old_probe.drain.return_value = [event(4, text='欠落したバッチ')]
+        new_probe.drain.side_effect = [
+            [event(1), event(4, tick=155, composition_tick=110, text='古い入力'),
+             event(4, tick=155, composition_tick=150, text='新しい入力')], []]
+        factory = Mock(side_effect=[old_probe, new_probe])
+        monitor = AutoImeMonitor(Config(), Mock(), reader_factory=lambda: reader, probe_factory=factory)
+        monitor.state.track(FIELD, 0)
+        monitor.state.observe([event(4)], 100)
+        previous_edit = monitor.state.take(100)
+        observed, reads = [], 0
+        def read():
+            nonlocal reads
+            reads += 1
+            reader.now.return_value = 100 + reads * 30
+            if reads == 2:
+                self.assertFalse(monitor.state.valid(previous_edit))
+                self.assertIsNone(monitor.state.pending)
+                self.assertFalse(monitor.state.closed)
+            if reads == 3:
+                observed.append(monitor.state.take(190))
+                monitor.stopping.set()
+            return FIELD
+        reader.read.side_effect = read
+        with patch.dict(sys.modules, {'comtypes': Mock()}), \
+                patch.object(monitor.stopping, 'wait', return_value=False), \
+                self.assertLogs('kana_rewriter.auto_ime', level='WARNING') as logs:
+            monitor._run()
+        self.assertIsNone(monitor.error)
+        self.assertEqual(observed[0].text, '新しい入力')
+        self.assertEqual(factory.call_count, 2)
+        old_probe.start.assert_called_once()
+        old_probe.close.assert_called_once()
+        new_probe.start.assert_called_once()
+        self.assertIn('監視を再接続', logs.output[0])
+
+    def test_overflow_does_not_reconnect_when_detach_is_uncertain(self):
+        reader, probe = Mock(), Mock()
+        reader.read.return_value = FIELD
+        reader.now.return_value = 100
+        probe.start.return_value = probe
+        probe.close.return_value = False
+        probe.drain.return_value = []
+        probe.dropped.return_value = 1
+        factory = Mock(return_value=probe)
+        monitor = AutoImeMonitor(Config(), Mock(), reader_factory=lambda: reader, probe_factory=factory)
+        with patch.dict(sys.modules, {'comtypes': Mock()}), \
+                self.assertLogs('kana_rewriter.auto_ime', level='WARNING'):
+            monitor._run()
+        self.assertIn('解除を確認できません', str(monitor.error))
+        self.assertEqual(factory.call_count, 1)
+
     def test_transient_focus_exception_keeps_subscription_and_wakes_on_recovery(self):
         reader, probe, wake = Mock(), Mock(), Mock()
         probe.start.return_value = probe

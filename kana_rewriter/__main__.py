@@ -6,13 +6,24 @@ import sys
 import time
 import logging
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .core import Config, Converter, apply_result
 from .hotkeys import parse_hotkey
 from .timing import stage, buffered_logs, flush_logs
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingConversion:
+    future: object
+    captured: object
+    started: float
+    capture_seconds: float
+    japanese_trigger: bool = False
+    commit: object = None
+    prepared: object = None
 
 
 class FixedConverter:
@@ -37,6 +48,8 @@ def main():
     parser = argparse.ArgumentParser(description="確定済み日本語をローカルAIでかな漢字変換")
     parser.add_argument("--config", help="TOML設定ファイル（省略時は既定値）")
     parser.add_argument("--text", help="ウィンドウを操作せず、接続・変換を確認")
+    parser.add_argument("--preview", action=argparse.BooleanOptionalAction, default=None,
+                        help="入力欄の近くの変換プレビューを切り替え")
     parser.add_argument("--left-context", default="", help="--textの左文脈")
     parser.add_argument("--right-context", default="", help="--textの右文脈")
     parser.add_argument("--debug", action="store_true", help="変換対象・文脈・モデル出力・編集方式を端末に表示")
@@ -119,14 +132,15 @@ def _run(args, benchmarking):
         elif config.backend == "llama_cpp":
             print("GGUFモデルを読み込んでいます…", flush=True)
             converter.load_model()
-        return run_windows(converter, config, debug=args.debug, timings=args.timings)
+        return run_windows(converter, config, debug=args.debug, timings=args.timings,
+                           preview=config.preview_enabled if args.preview is None else args.preview)
     except Exception as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return 1
 
 
 @buffered_logs()
-def run_windows(converter, config, debug=False, timings=False):
+def run_windows(converter, config, debug=False, timings=False, preview=False):
     from .winapi import user, W, MessageWaiter
     bindings = {1: parse_hotkey(config.hotkey_line), 2: parse_hotkey(config.hotkey_selection)}
     if config.hotkey_quit:
@@ -138,6 +152,7 @@ def run_windows(converter, config, debug=False, timings=False):
     tsf_editor = None
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
+    live_preview = None
     if config.edit_backend == "clipboard":
         from .windows import Desktop
         desktop = Desktop(paste_wait_seconds=config.paste_wait_seconds,
@@ -164,6 +179,10 @@ def run_windows(converter, config, debug=False, timings=False):
                 actions[registration] = ident
         if config.edit_backend != "clipboard":
             desktop.warmup()
+        if preview:
+            from .preview import LivePreview
+            live_preview = LivePreview(config, converter, pool)
+            print("変換プレビュー: 有効（TSF対応入力欄／変換候補を随時更新）", flush=True)
         if config.auto_replace_on_ime_commit:
             from .auto_ime import AutoImeMonitor
             if config.ime_commit_backend == 'tsf':
@@ -187,6 +206,8 @@ def run_windows(converter, config, debug=False, timings=False):
                     print("終了します", flush=True)
                     return 0
                 if action in (1, 2) and pending is None:
+                    if live_preview is not None:
+                        live_preview.paused.set()
                     if auto_monitor is not None:
                         auto_monitor.begin()
                     try:
@@ -201,10 +222,12 @@ def run_windows(converter, config, debug=False, timings=False):
                                                    config.max_chars, trigger_keys=trigger_keys)
                         capture_seconds = time.perf_counter() - started
                         future = pool.submit(timed_conversion, converter, captured)
-                        pending = (future, captured, started, capture_seconds, japanese_trigger, None, None)
+                        pending = PendingConversion(future, captured, started, capture_seconds, japanese_trigger)
                         future.add_done_callback(waiter.wake)
                         print("変換中…", flush=True)
                     except Exception as exc:
+                        if live_preview is not None:
+                            live_preview.paused.clear()
                         if auto_monitor is not None:
                             auto_monitor.finish()
                         flush_logs()
@@ -212,6 +235,8 @@ def run_windows(converter, config, debug=False, timings=False):
             if auto_monitor is not None and pending is None:
                 commit = auto_monitor.take()
                 if commit is not None and auto_monitor.begin(commit):
+                    if live_preview is not None:
+                        live_preview.paused.set()
                     try:
                         from .auto_ime import capture_commit
                         started = time.perf_counter()
@@ -223,44 +248,49 @@ def run_windows(converter, config, debug=False, timings=False):
                         if not auto_monitor.valid(commit):
                             raise RuntimeError("取得中に入力・フォーカスが変わったため中止しました")
                         future = pool.submit(timed_conversion, converter, captured)
-                        pending = (future, captured, started, capture_seconds, False, commit, prepared)
+                        pending = PendingConversion(future, captured, started, capture_seconds,
+                                                    commit=commit, prepared=prepared)
                         future.add_done_callback(waiter.wake)
                         print("IME確定: 変換中…", flush=True)
                     except Exception as exc:
+                        if live_preview is not None:
+                            live_preview.paused.clear()
                         auto_monitor.finish()
                         flush_logs()
                         print(f"自動変換を中止: {exc}", flush=True)
                         from .tsf_edit import RestartRequired
                         if isinstance(exc, RestartRequired):
                             return 1
-            if pending is not None and pending[0].done():
-                future, captured, started, capture_seconds, japanese_trigger, auto_commit, prepared = pending
+            if pending is not None and pending.future.done():
+                job = pending
                 pending = None
                 try:
-                    result, inference_seconds = future.result()
+                    result, inference_seconds = job.future.result()
                     applying = time.perf_counter()
-                    if japanese_trigger:
+                    if job.japanese_trigger:
                         japanese_release.wait_released()
-                    if auto_commit is not None and not auto_monitor.valid(auto_commit):
+                    if job.commit is not None and not auto_monitor.valid(job.commit):
                         raise RuntimeError("推論中に入力・フォーカスが変わったため自動変換を中止しました")
-                    changed = (tsf_editor.apply(prepared, captured, result) if prepared is not None
-                               else apply_result(desktop, captured, result))
+                    changed = (tsf_editor.apply(job.prepared, job.captured, result) if job.prepared is not None
+                               else apply_result(desktop, job.captured, result))
                     finished = time.perf_counter()
                     logger.debug("時間集計: 取得=%.1fms / AI=%.1fms / 適用=%.1fms / AI以外=%.1fms / 合計=%.1fms",
-                                 capture_seconds * 1000, inference_seconds * 1000,
+                                 job.capture_seconds * 1000, inference_seconds * 1000,
                                  (finished - applying) * 1000,
-                                 (finished - started - inference_seconds) * 1000,
-                                 (finished - started) * 1000)
+                                 (finished - job.started - inference_seconds) * 1000,
+                                 (finished - job.started) * 1000)
                     flush_logs()
                     print("差し替え処理を実行しました" if changed else "変換の必要はありません", flush=True)
                 except Exception as exc:
                     flush_logs()
                     print(f"中止: {exc}", flush=True)
-                    if prepared is not None:
+                    if job.prepared is not None:
                         from .tsf_edit import RestartRequired
                         if isinstance(exc, RestartRequired):
                             return 1
                 finally:
+                    if live_preview is not None:
+                        live_preview.paused.clear()
                     if auto_monitor is not None:
                         auto_monitor.finish()
             if auto_monitor is not None:
@@ -281,6 +311,8 @@ def run_windows(converter, config, debug=False, timings=False):
                 cleanup.callback(user.UnregisterHotKey, None, ident)
             if auto_monitor is not None:
                 cleanup.callback(auto_monitor.close)
+            if live_preview is not None:
+                cleanup.callback(live_preview.close)
     return 0
 
 

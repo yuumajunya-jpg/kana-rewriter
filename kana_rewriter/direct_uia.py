@@ -21,6 +21,19 @@ def normalize(text):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def text_provider(automation, focused):
+    """Resolve the document owner, not transient text children inside it."""
+    element = focused
+    for _ in range(8):
+        pattern = automation.pattern(element, 'TextPattern')
+        if pattern is not None:
+            return element, pattern
+        element = automation.client.ControlViewWalker.GetParentElement(element)
+        if not element:
+            break
+    raise RuntimeError('この入力欄はUIAのTextPatternによる取得・選択に対応していません')
+
+
 def property_values(automation, element, names):
     """Fetch a fresh element-only snapshot; cache requests, never live values."""
     try:
@@ -71,16 +84,8 @@ class Automation:
         state = property_values(self, focused, ("IsPassword", "IsEnabled", "HasKeyboardFocus"))
         if state["IsPassword"] or not state["IsEnabled"]:
             raise RuntimeError("入力先を取得できないか、パスワード・無効な入力欄です")
-        element = focused
-        # A focused text child can expose TextPattern on its editable ancestor.
-        for _ in range(8):
-            pattern = self.pattern(element, "TextPattern")
-            if pattern is not None:
-                return AutomationEditor(self, focused, element, pattern, config, initial_state=state)
-            element = self.client.ControlViewWalker.GetParentElement(element)
-            if not element:
-                break
-        raise RuntimeError("この入力欄はUIAのTextPatternによる取得・選択に対応していません")
+        element, pattern = text_provider(self, focused)
+        return AutomationEditor(self, focused, element, pattern, config, initial_state=state)
 
 
 class AutomationEditor:

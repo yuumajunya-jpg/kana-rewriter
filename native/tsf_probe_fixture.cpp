@@ -24,6 +24,7 @@ public:
     bool asynchronous_locks=false;
     DWORD pending_lock=0;
     bool stall_read_once=false;
+    unsigned layout_mode=0;
     void sync_window() {
         SendMessageW(window,WM_SETTEXT,0,reinterpret_cast<LPARAM>(text.c_str()));
         SendMessageW(window,EM_SETSEL,text.size(),text.size());
@@ -99,7 +100,10 @@ public:
     HRESULT STDMETHODCALLTYPE GetEndACP(LONG* end) override { *end=static_cast<LONG>(text.size()); return locked?S_OK:TS_E_NOLOCK; }
     HRESULT STDMETHODCALLTYPE GetActiveView(TsViewCookie* view) override { *view=0; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetACPFromPoint(TsViewCookie,const POINT*,DWORD,LONG*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetTextExt(TsViewCookie,LONG,LONG,RECT* rect,BOOL* clipped) override { *rect={0,0,100,20}; *clipped=FALSE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTextExt(TsViewCookie,LONG,LONG,RECT* rect,BOOL* clipped) override {
+        if (layout_mode==1) return TS_E_NOLAYOUT;
+        *rect=layout_mode==2?RECT{}:RECT{0,0,100,20}; *clipped=FALSE; return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE GetScreenExt(TsViewCookie,RECT* rect) override { *rect={0,0,100,20}; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetWnd(TsViewCookie,HWND* hwnd) override { *hwnd=window; return S_OK; }
 };
@@ -305,6 +309,26 @@ public:
         HRESULT hr=(*composition)->GetRange(&range);
         if (FAILED(hr)) return hr;
         if (operation=="update") return range->SetText(cookie,0,L"さんぽ",3);
+        if (operation=="grow") return range->SetText(cookie,0,L"さんぽをしよう",7);
+        if (operation=="longupdate") {
+            std::wstring text(700,L'あ');
+            return range->SetText(cookie,0,text.c_str(),static_cast<LONG>(text.size()));
+        }
+        if (operation=="shrink") return range->SetText(cookie,0,L"さん",2);
+        if (operation=="previewprefix") return range->SetText(cookie,0,L"ぷれびゅ",4);
+        if (operation=="previewreading") return range->SetText(cookie,0,L"ぷれびゅー",5);
+        if (operation=="previewkatakana") return range->SetText(cookie,0,L"プレビュー",5);
+        if (operation=="erase") return range->SetText(cookie,0,L"",0);
+        if (operation=="recompose") {
+            hr=range->SetText(cookie,0,L"",0);
+            if (SUCCEEDED(hr)) hr=(*composition)->EndComposition(cookie);
+            composition->Reset();
+            ComPtr<ITfContextComposition> service;
+            if (SUCCEEDED(hr)) hr=context.As(&service);
+            if (SUCCEEDED(hr)) hr=service->StartComposition(cookie,range.Get(),
+                static_cast<ITfCompositionSink*>(this),composition->ReleaseAndGetAddressOf());
+            return hr;
+        }
         if (operation=="cancel") {
             hr=range->SetText(cookie,0,L"",0);
             if (FAILED(hr)) return hr;
@@ -349,6 +373,13 @@ int main() {
             if (operation=="exit") running=false;
             else if (operation=="async") { store->asynchronous_locks=true; std::cout<<"RESULT 0 0"<<std::endl; }
             else if (operation=="stallread") { store->stall_read_once=true; std::cout<<"RESULT 0 0"<<std::endl; }
+            else if (operation=="layoutmissing") { store->layout_mode=1; std::cout<<"RESULT 0 0"<<std::endl; }
+            else if (operation=="layoutzero") { store->layout_mode=2; std::cout<<"RESULT 0 0"<<std::endl; }
+            else if (operation=="layoutready") {
+                store->layout_mode=0;
+                if (store->sink) store->sink->OnLayoutChange(TS_LC_CHANGE,0);
+                std::cout<<"RESULT 0 0"<<std::endl;
+            }
             else if (operation=="stall") {
                 std::cout<<"RESULT 0 0"<<std::endl;
                 Sleep(200); // test-only blocked target, never an editor delay

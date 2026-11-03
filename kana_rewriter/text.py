@@ -21,6 +21,14 @@ def is_katakana(character: str) -> bool:
     return "KATAKANA" in name
 
 
+def katakana_boundary(text, index):
+    # Unicode names for these shared marks contain "KATAKANA-HIRAGANA".
+    # Their script follows the preceding letter, not the name substring.
+    while index >= 0 and text[index] in "ー\u3099\u309a":
+        index -= 1
+    return index >= 0 and is_katakana(text[index])
+
+
 def reading_spans(text: str):
     """Split a mixed selection into contiguous kana spans without morphology."""
     start = None
@@ -47,7 +55,8 @@ class TextRegion:
 
 def split_at_caret(text: str, caret: int, conversion_delimiters: str = "。",
                    stop_at_kanji: bool = True,
-                   trailing_punctuation: str = TRAILING_PUNCTUATION) -> TextRegion:
+                   trailing_punctuation: str = TRAILING_PUNCTUATION,
+                   composition_start: int | None = None) -> TextRegion:
     """Scan left to configured boundaries, retaining trailing punctuation."""
     if not 0 <= caret <= len(text):
         raise ValueError("カーソル位置が文字列の範囲外です")
@@ -59,7 +68,9 @@ def split_at_caret(text: str, caret: int, conversion_delimiters: str = "。",
     while start > 0:
         character = text[start - 1]
         if (character in conversion_delimiters or character in "\r\n"
-                or (stop_at_kanji and (is_kanji(character) or is_katakana(character)))):
+                or (stop_at_kanji and (is_kanji(character) or
+                    ((composition_start is None or start - 1 < composition_start)
+                     and katakana_boundary(text, start - 1))))):
             break
         start -= 1
     if not any(reading_spans(text[start:end])):

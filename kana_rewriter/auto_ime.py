@@ -1,27 +1,14 @@
 """Follow editable focus and deliver TSF commits to the normal message loop."""
-from dataclasses import dataclass
 import logging
 import os
 import threading
 import time
+from collections import Counter
 
-from .tsf import NativeProbe, KINDS, eligible, INPUT_EVENTS, COMMIT_MAX_AGE_MS
+from .tsf import NativeProbe, KINDS
+from .commit_state import CommitState, Commit, Focus, FOCUS_RETRY_MS, invalidates_commit
 
 logger = logging.getLogger(__name__)
-
-FOCUS_RETRY_MS = 300
-MODIFIER_KEYS = frozenset((0x10, 0x11, 0x12, 0x5B, 0x5C, *range(0xA0, 0xA6)))
-
-
-def invalidates_commit(event):
-    # OnEndEdit also fires for selection/property updates with no composition.
-    # The editor backend still verifies the complete text and selection before
-    # replacing. Keep cancellation for real keys and new IME compositions.
-    if event["kind"] == 3:
-        return event["active"] != 0
-    if event["kind"] == 8:
-        return event["key"] not in MODIFIER_KEYS
-    return event["kind"] in INPUT_EVENTS
 
 
 def tick_count():
@@ -29,162 +16,6 @@ def tick_count():
     kernel = C.WinDLL("kernel32")
     kernel.GetTickCount64.restype = C.c_uint64
     return kernel.GetTickCount64()
-
-
-@dataclass(frozen=True)
-class Focus:
-    target: tuple
-    runtime: tuple
-    tid: int
-
-
-@dataclass(frozen=True)
-class Commit:
-    text: str
-    focus: Focus
-    tick: int
-    revision: int
-    native_range: tuple | None = None
-
-
-class CommitState:
-    """Bounded mailbox plus an edit/focus revision for in-flight inference."""
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.changed = threading.Condition(self.lock)
-        self.focus_failed_since = None
-        self.focus = None
-        self.revision = 0
-        self.pending = None
-        self.busy = False
-        self.closed = False
-        # Accept only compositions that began after this field became eligible.
-        # The native observer owns composition history; Python owns this boundary.
-        self.accept_since = 0
-
-    def track(self, focus, now=0):
-        with self.lock:
-            recovered = self.focus_failed_since is not None
-            if (recovered and self.focus is not None
-                    and now - self.focus_failed_since >= FOCUS_RETRY_MS):
-                self.revision += 1
-                self.pending = None
-                self.accept_since = now
-            self.focus_failed_since = None
-            if focus != self.focus:
-                logger.debug("TSF入力先変更: old=%r / new=%r / tick=%s / pending=%s / busy=%s",
-                             self.focus, focus, now, self.pending is not None, self.busy)
-                self.focus = focus
-                self.revision += 1
-                self.pending = None
-                self.accept_since = now
-            self.changed.notify_all()
-            return recovered
-
-    def focus_failed(self, now):
-        """Suspend delivery on UIA errors; retain the subscription for a retry."""
-        with self.lock:
-            if self.focus_failed_since is None:
-                self.focus_failed_since = now
-            if now - self.focus_failed_since >= FOCUS_RETRY_MS:
-                if self.focus is not None:
-                    self.focus = None
-                    self.revision += 1
-                self.pending = None
-                self.accept_since = now
-            self.changed.notify_all()
-            return self.focus
-
-    def observe(self, events, now):
-        with self.lock:
-            for event in events:
-                if (self.focus is None or event["tid"] != self.focus.tid
-                        or event["pid"] != self.focus.target[2]):
-                    if event["kind"] == 4:
-                        logger.debug("TSF確定判定: 入力先不一致 / pid=%s tid=%s / focus=%r",
-                                     event["pid"], event["tid"], self.focus)
-                    continue
-                if invalidates_commit(event):
-                    if self.pending is not None:
-                        logger.debug("TSF確定判定: 保留確定を破棄 / event=%s key=%s / revision=%s",
-                                     event["kind"], event["key"], self.revision)
-                    self.revision += 1
-                    self.pending = None
-                    self.changed.notify_all()
-                if self.closed or self.busy:
-                    if event["kind"] == 4:
-                        logger.debug("TSF確定判定: 受付停止 / closed=%s busy=%s", self.closed, self.busy)
-                    continue
-                valid, reason = eligible(event, now, self.focus.target)
-                if event["kind"] == 4:
-                    logger.debug("TSF確定範囲: text=%r / commit_id=%s / native_revision=%s / focus=%r",
-                                 event["text"], event.get('commit_id'), event.get('revision'), self.focus)
-                    logger.debug("TSF確定判定: eligible=%s reason=%s / now=%s tick=%s "
-                                 "composition_tick=%s accept_since=%s / revision=%s",
-                                 valid, reason, now, event["tick"], event["composition_tick"],
-                                 self.accept_since, self.revision)
-                if valid and self.accept_since <= event["composition_tick"] <= event["tick"]:
-                    text = event["text"].replace("\r\n", "\n").replace("\r", "\n")
-                    native_range = ((event['commit_id'], event['revision'], event['text'])
-                                    if 'commit_id' in event and 'revision' in event else None)
-                    self.pending = Commit(text, self.focus, event["tick"], self.revision, native_range)
-                elif valid:
-                    logger.debug("TSF確定破棄: 確定開始が受付期間外 / composition_tick=%s "
-                                 "accept_since=%s commit_tick=%s / focus=%r",
-                                 event["composition_tick"], self.accept_since, event["tick"], self.focus)
-                elif event["kind"] == 4 and reason == "ctrl_confirm":
-                    logger.debug("TSF自動変換: Ctrl+Enterのため置換しません")
-
-    def take(self, now):
-        with self.lock:
-            if self.focus_failed_since is not None:
-                return None
-            commit, self.pending = self.pending, None
-            if (not self.closed and not self.busy and commit is not None
-                    and 0 <= now - commit.tick <= COMMIT_MAX_AGE_MS):
-                return commit
-        return None
-
-    def valid(self, commit, focus_wait=0):
-        with self.lock:
-            # Do not authorize edits using stale focus. A transient UIA failure
-            # may recover without permanently discarding the inference result.
-            self.changed.wait_for(
-                lambda: self.focus_failed_since is None or self.closed
-                or self.focus != commit.focus or self.revision != commit.revision,
-                timeout=focus_wait)
-            return (not self.closed and self.focus == commit.focus
-                    and self.revision == commit.revision and self.focus_failed_since is None)
-
-    def begin(self, commit=None):
-        with self.lock:
-            if self.closed:
-                return False
-            if commit is not None:
-                if (self.busy or self.focus_failed_since is not None
-                        or self.focus != commit.focus or self.revision != commit.revision):
-                    return False
-            else:
-                self.revision += 1
-            self.pending = None
-            self.busy = True
-            self.changed.notify_all()
-            return True
-
-    def finish(self, now):
-        with self.lock:
-            self.revision += 1
-            self.pending = None
-            self.busy = False
-            self.accept_since = max(self.accept_since, now)
-            self.changed.notify_all()
-
-    def close(self):
-        with self.lock:
-            self.closed = True
-            self.pending = None
-            self.revision += 1
-            self.changed.notify_all()
 
 
 class FocusReader:
@@ -209,7 +40,7 @@ class FocusReader:
 
     def read(self):
         from .direct_win32 import window_identity
-        from .direct_uia import property_values
+        from .direct_uia import property_values, text_provider
         from .winapi import user
         target = window_identity()
         if target[2] == os.getpid():
@@ -222,25 +53,13 @@ class FocusReader:
                                    ("IsPassword", "IsEnabled", "HasKeyboardFocus"))
         if metadata["IsPassword"] or not metadata["IsEnabled"] or not metadata["HasKeyboardFocus"]:
             return None
-        runtime = tuple(focused.GetRuntimeId())
-        if (self.last_focus is not None and self.last_focus.target == target
-                and self.last_focus.runtime == runtime):
-            return self.last_focus
-        element = focused
-        for _ in range(8):
-            pattern = self.automation.pattern(element, "TextPattern")
-            if pattern is not None:
-                value = self.automation.pattern(element, "ValuePattern")
-                if value is not None and value.CurrentIsReadOnly:
-                    return None
-                readonly = pattern.DocumentRange.GetAttributeValue(self.automation.types.UIA_IsReadOnlyAttributeId)
-                if isinstance(readonly, (bool, int)) and readonly:
-                    return None
-                break
-            element = client.ControlViewWalker.GetParentElement(element)
-            if not element:
-                return None
-        else:
+        element, pattern = text_provider(self.automation, focused)
+        runtime = tuple(element.GetRuntimeId())
+        value = self.automation.pattern(element, "ValuePattern")
+        if value is not None and value.CurrentIsReadOnly:
+            return None
+        readonly = pattern.DocumentRange.GetAttributeValue(self.automation.types.UIA_IsReadOnlyAttributeId)
+        if isinstance(readonly, (bool, int)) and readonly:
             return None
         if not runtime or window_identity() != target:
             return None
@@ -265,7 +84,7 @@ class AutoImeMonitor:
     def __init__(self, config, wake, reader_factory=FocusReader, probe_factory=NativeProbe):
         self.config, self.wake = config, wake
         self.reader_factory, self.probe_factory = reader_factory, probe_factory
-        self.state = CommitState()
+        self.state = CommitState(native_context=config.ime_commit_backend == 'tsf')
         self.stopping = threading.Event()
         self.ready = threading.Event()
         self.error = None
@@ -323,7 +142,9 @@ class AutoImeMonitor:
             retry_at = 0
             attached_at = 0
             attached = False
+            last_drain_at = time.perf_counter()
             while not self.stopping.is_set():
+                focus_started = time.perf_counter()
                 try:
                     current = self.reader.read()
                 except Exception:
@@ -332,20 +153,23 @@ class AutoImeMonitor:
                 else:
                     if self.state.track(current, self.reader.now()):
                         self.wake()
-                if current != field:
-                    if probe is not None and (current is None or field is None or current.tid != field.tid):
+                focus_seconds = time.perf_counter() - focus_started
+                if not self.state.same_focus(current, field):
+                    if probe is not None and (self.state.native_context or current is None
+                                              or field is None or current.tid != field.tid):
                         clean = probe.close()
                         probe = None
                         if not clean:
                             raise RuntimeError("入力先変更時のTSF監視解除を確認できません。自動変換を停止しました")
-                    # Same GUI thread: retain its subscription, discard the old
-                    # field's queued notices and keep the new UIA identity.
+                    # A real target change invalidates queued notices. For TSF
+                    # edits, RuntimeId-only changes are NOT target changes:
+                    # process their context/commit notifications in order below.
                     if probe is not None:
                         discarded = probe.drain()
                         logger.debug("TSF入力先変更時の通知破棄: old=%r / new=%r / events=%s",
                                      field, current, [(e['kind'], e['tick'], e['composition_tick'],
                                                        len(e['text'])) for e in discarded])
-                    field = current
+                field = current
                 now = self.reader.now()
                 if field is not None and probe is None and (field != rejected or now >= retry_at):
                     try:
@@ -357,15 +181,37 @@ class AutoImeMonitor:
                         rejected, retry_at = field, now + 5000
                         logger.debug("TSF自動変換: この入力先の監視を開始できません: %s", exc)
                 if probe is not None:
+                    drain_started = time.perf_counter()
                     events = probe.drain()
+                    drained_at = time.perf_counter()
+                    drain_interval = drained_at - last_drain_at
+                    last_drain_at = drained_at
                     attached |= any(event["kind"] == 1 for event in events)
                     for event in events:
                         if event["kind"] in (1, 2, 4, 5, 6, 9):
-                            logger.debug("TSF自動変換: %s pid=%s tid=%s key=%s mods=%s hr=0x%08x chars=%s",
+                            logger.debug("TSF自動変換: %s pid=%s tid=%s key=%s mods=%s hr=0x%08x chars=%s generation=%s",
                                          KINDS.get(event["kind"]), event["pid"], event["tid"], event["key"],
-                                         event["modifiers"], event["hr"], len(event["text"]))
-                    if probe.dropped():
-                        raise RuntimeError("TSF通知が欠落したため自動変換を停止しました")
+                                         event["modifiers"], event["hr"], len(event["text"]), event['generation'])
+                    dropped = probe.dropped()
+                    if dropped:
+                        # Do not consume any part of a batch with missing history.
+                        # A fresh wrapper also leaves previously prepared edits
+                        # pointing to a stopped probe, never the restarted one.
+                        self.state.resync(now)
+                        self.wake()
+                        old_probe, probe = probe, None
+                        if not old_probe.close():
+                            raise RuntimeError("TSF通知欠落後に古い監視の解除を確認できませんでした")
+                        native = self.probe_factory(0, self.config.tsf_monitor_path or None)
+                        counts = Counter(KINDS.get(event['kind'], str(event['kind'])) for event in events)
+                        ticks = [event['tick'] for event in events]
+                        logger.warning(
+                            "TSF通知が%s件欠落: 今回の変換を破棄し、監視を再接続します "
+                            "(回収=%s件 / 内訳=%s / 通知期間=%sms / UIA取得=%.1fms / "
+                            "回収処理=%.1fms / 回収間隔=%.1fms)",
+                            dropped, len(events), dict(counts), max(ticks)-min(ticks) if ticks else 0,
+                            focus_seconds*1000, (drained_at-drain_started)*1000, drain_interval*1000)
+                        continue
                     self.state.observe(events, now)
                     if events:
                         self.wake()

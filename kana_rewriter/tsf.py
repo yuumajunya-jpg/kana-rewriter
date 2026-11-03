@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 from .text import reading_spans
+from .notifications import NotificationPump
 
 KINDS = {1: "attached", 2: "context", 3: "editing", 4: "commit_candidate",
          5: "canceled_or_empty", 6: "error", 7: "detached", 8: "key", 9: "unsupported"}
@@ -32,6 +33,8 @@ def probe_path():
 
 
 class NativeProbe:
+    packet_type = Packet
+    protocol_version = PROTOCOL_VERSION
     def __init__(self, tid, dll=None):
         if sys.platform != "win32" or C.sizeof(C.c_void_p) != 8:
             raise RuntimeError("TSF監視は64ビットWindows/Python専用です")
@@ -43,33 +46,45 @@ class NativeProbe:
         if version is None:
             raise RuntimeError("TSF監視DLLが古い形式です。scripts/build_tsf_probe.ps1で再ビルドしてください")
         version.restype = W.DWORD
-        if version() != PROTOCOL_VERSION:
+        if version() != self.protocol_version:
             raise RuntimeError("TSF監視DLLの通知形式が非対応です。scripts/build_tsf_probe.ps1で再ビルドしてください")
         self.dll.StartProbe.argtypes = [W.DWORD]
         self.dll.StartProbe.restype = W.BOOL
-        self.dll.PollProbe.argtypes = [C.POINTER(Packet)]
+        self.dll.PollProbe.argtypes = [C.POINTER(self.packet_type)]
         self.dll.PollProbe.restype = W.BOOL
         self.dll.DroppedProbe.restype = W.DWORD
         self.dll.StopProbe.restype = W.BOOL
         self.tid, self.started = tid, False
+        self.pump = None
 
     def start(self):
         if not self.dll.StartProbe(self.tid):
             raise C.WinError(C.get_last_error())
         self.started = True
+        try:
+            self.pump = NotificationPump(self._poll, self.dll.DroppedProbe)
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def drain(self):
+        return self.pump.drain() if self.pump else []
+
+    def _poll(self):
         events = []
-        packet = Packet()
+        packet = self.packet_type()
         while self.dll.PollProbe(C.byref(packet)):
-            events.append({name: getattr(packet, name) for name, _ in Packet._fields_})
+            events.append({name: getattr(packet, name) for name, _ in self.packet_type._fields_})
         return events
 
     def dropped(self):
-        return self.dll.DroppedProbe()
+        return self.pump.dropped() if self.pump else 0
 
     def close(self):
+        if self.pump is not None:
+            self.pump.close()
+            self.pump = None
         if self.started:
             self.started = False
             return bool(self.dll.StopProbe())

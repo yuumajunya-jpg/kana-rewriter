@@ -11,12 +11,25 @@
 #include <algorithm>
 #include <cstdio>
 
+// llvm-mingw omits ITfTextLayoutSink; declare its Windows SDK ABI locally.
+#ifdef KANA_LIVE_PREVIEW
+const GUID preview_layout_iid={0x2af2d06a,0xdd5b,0x4927,{0xa0,0xb4,0x54,0xf1,0x9c,0x91,0xfa,0xde}};
+struct PreviewLayoutSink : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE OnLayoutChange(ITfContext*,int,ITfContextView*)=0;
+};
+#endif
+
 using Microsoft::WRL::ComPtr;
 constexpr unsigned capacity = 64, text_limit = 1024;
 struct Packet {
     DWORD kind, pid, tid, hr, key, active, modifiers;
     ULONGLONG tick, hwnd, generation, composition_tick;
     wchar_t text[text_limit];
+#ifdef KANA_LIVE_PREVIEW
+    RECT caret_rect;
+    DWORD position_valid;
+    wchar_t before[text_limit],after[text_limit];
+#endif
 };
 constexpr DWORD ModifierCtrl=1, ModifierAlt=2, ModifierShift=4, ModifierWin=8;
 struct Shared {
@@ -36,14 +49,23 @@ DWORD host_tid;
 HANDLE host_thread;
 bool host_poisoned=false;
 
+#ifdef KANA_LIVE_PREVIEW
+std::wstring mapping_name(DWORD pid) { return L"Local\\kana-tsf-preview-" + std::to_wstring(pid); }
+UINT message_id() { return RegisterWindowMessageW(L"kana-tsf-preview-control-v1"); }
+#else
 std::wstring mapping_name(DWORD pid) { return L"Local\\kana-tsf-probe-" + std::to_wstring(pid); }
 UINT message_id() { return RegisterWindowMessageW(L"kana-tsf-probe-control-v1"); }
+#endif
 
 class Observer;
 thread_local Observer* observer;
 LRESULT CALLBACK control_window(HWND, UINT, WPARAM, LPARAM);
 
-class Observer final : public ITfTextEditSink, public ITfThreadMgrEventSink, public ITfKeyTraceEventSink {
+class Observer final : public ITfTextEditSink, public ITfThreadMgrEventSink, public ITfKeyTraceEventSink
+#ifdef KANA_LIVE_PREVIEW
+    , public PreviewLayoutSink
+#endif
+{
     std::atomic<ULONG> refs{1};
 public:
     struct Busy {
@@ -64,6 +86,15 @@ public:
     ULONGLONG key_tick=0;
     bool canceled=false;
     bool failed=false;
+#ifdef KANA_LIVE_PREVIEW
+    RECT preview_rect{};
+    bool preview_position_valid=false;
+    DWORD layout_cookie=TF_INVALID_COOKIE;
+    TfClientId preview_client=0;
+    bool preview_client_active=false, layout_pending=false;
+    std::wstring preview_before,preview_after;
+    HRESULT STDMETHODCALLTYPE OnLayoutChange(ITfContext*,int,ITfContextView*) override;
+#endif
     struct Range {
         ComPtr<IUnknown> identity;
         ComPtr<ITfRange> range;
@@ -76,6 +107,9 @@ public:
         if (iid==IID_IUnknown || iid==IID_ITfTextEditSink) *result=static_cast<ITfTextEditSink*>(this);
         else if (iid==IID_ITfThreadMgrEventSink) *result=static_cast<ITfThreadMgrEventSink*>(this);
         else if (iid==IID_ITfKeyTraceEventSink) *result=static_cast<ITfKeyTraceEventSink*>(this);
+#ifdef KANA_LIVE_PREVIEW
+        else if (iid==preview_layout_iid) *result=static_cast<PreviewLayoutSink*>(this);
+#endif
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
     }
@@ -96,6 +130,12 @@ public:
         packet.modifiers=(kind==Key || (kind==Candidate && fresh_key))?last_modifiers:0;
         packet.active=active;
         packet.composition_tick=composition_tick;
+#ifdef KANA_LIVE_PREVIEW
+        packet.caret_rect=preview_rect;
+        packet.position_valid=preview_position_valid?1:0;
+        std::copy(preview_before.begin(),preview_before.end(),packet.before);
+        std::copy(preview_after.begin(),preview_after.end(),packet.after);
+#endif
         if (text.size()>=text_limit) { packet.kind=Unsupported; packet.hr=ERROR_BUFFER_OVERFLOW; }
         else std::copy(text.begin(),text.end(),packet.text);
         shared->packets[static_cast<unsigned>(w)%capacity]=packet;
@@ -105,6 +145,11 @@ public:
     HRESULT clear_context() {
         previous.clear(); canceled=false; last_key=0; last_modifiers=0; key_tick=0; ++generation;
         HRESULT hr=S_OK;
+#ifdef KANA_LIVE_PREVIEW
+        if (context_source && layout_cookie!=TF_INVALID_COOKIE)
+            hr=context_source->UnadviseSink(layout_cookie);
+        layout_cookie=TF_INVALID_COOKIE;
+#endif
         if (context_source && text_cookie!=TF_INVALID_COOKIE) hr=context_source->UnadviseSink(text_cookie);
         text_cookie=TF_INVALID_COOKIE; context_source.Reset(); context.Reset();
         if (FAILED(hr)) { failed=true; emit(Error,hr); }
@@ -117,6 +162,10 @@ public:
         if (SUCCEEDED(hr) && context) hr=context.As(&context_source);
         if (SUCCEEDED(hr) && context_source)
             hr=context_source->AdviseSink(IID_ITfTextEditSink,static_cast<ITfTextEditSink*>(this),&text_cookie);
+#ifdef KANA_LIVE_PREVIEW
+        if (SUCCEEDED(hr) && context_source)
+            hr=context_source->AdviseSink(preview_layout_iid,static_cast<PreviewLayoutSink*>(this),&layout_cookie);
+#endif
         emit(Context,hr);
     }
     void refresh_focus() { ComPtr<ITfDocumentMgr> doc; if (!stopping() && manager && SUCCEEDED(manager->GetFocus(&doc))) focus(doc.Get()); }
@@ -131,6 +180,11 @@ public:
         auto get=tsf ? reinterpret_cast<GetManager>(GetProcAddress(tsf,"TF_GetThreadMgr")) : nullptr;
         HRESULT hr=get ? get(&manager) : E_NOINTERFACE;
         if (FAILED(hr) || !manager) { emit(Error,FAILED(hr)?hr:E_NOINTERFACE); return E_NOINTERFACE; }
+#ifdef KANA_LIVE_PREVIEW
+        hr=manager->Activate(&preview_client);
+        if (FAILED(hr)) return hr;
+        preview_client_active=true;
+#endif
         hr=manager.As(&manager_source);
         if (SUCCEEDED(hr)) hr=manager_source->AdviseSink(IID_ITfThreadMgrEventSink,
             static_cast<ITfThreadMgrEventSink*>(this),&manager_cookie);
@@ -152,7 +206,14 @@ public:
             clean=SUCCEEDED(manager_source->UnadviseSink(manager_cookie)) && clean;
         if (manager_source && key_cookie!=TF_INVALID_COOKIE)
             clean=SUCCEEDED(manager_source->UnadviseSink(key_cookie)) && clean;
-        manager_cookie=key_cookie=TF_INVALID_COOKIE; manager_source.Reset(); manager.Reset();
+        manager_cookie=key_cookie=TF_INVALID_COOKIE; manager_source.Reset();
+#ifdef KANA_LIVE_PREVIEW
+        if (manager && preview_client_active) {
+            clean=SUCCEEDED(manager->Deactivate()) && clean;
+            preview_client_active=false;
+        }
+#endif
+        manager.Reset();
         emit(Detached,clean?S_OK:E_FAIL);
         if (shared) { shared->control_hwnd=0; if (clean) InterlockedExchange(&shared->attached,0); }
         if (window) { KillTimer(window,1); DestroyWindow(window); window=nullptr; }
@@ -217,7 +278,74 @@ public:
         }
         if (hr!=S_FALSE) { emit(Error,hr); previous.clear(); return; }
         if (previous.empty() && !current.empty()) { canceled=false; last_key=0; last_modifiers=0; key_tick=0; }
+#ifdef KANA_LIVE_PREVIEW
+        preview_rect={}; preview_position_valid=false;
+        preview_before.clear(); preview_after.clear();
+        std::wstring live;
+        if (!current.empty()) {
+            std::sort(current.begin(),current.end(),[&](const Range& a,const Range& b) {
+                LONG order=0;
+                return SUCCEEDED(a.range->CompareStart(cookie,b.range.Get(),TF_ANCHOR_START,&order)) && order<0;
+            });
+            ComPtr<ITfRange> whole;
+            hr=current.front().range->Clone(&whole);
+            if (SUCCEEDED(hr)) hr=whole->ShiftEndToRange(cookie,current.back().range.Get(),TF_ANCHOR_END);
+            // GetText may return fewer characters than requested. Read a clone
+            // to exhaustion rather than treating one chunk as the entire input.
+            auto read_all=[&](ITfRange* source,std::wstring& text) -> HRESULT {
+                ComPtr<ITfRange> cursor; HRESULT result=source->Clone(&cursor);
+                if (FAILED(result)) return result;
+                for (;;) {
+                    wchar_t buffer[256]{}; ULONG count=0;
+                    result=cursor->GetText(cookie,TF_TF_MOVESTART,buffer,256,&count);
+                    if (FAILED(result)) return result;
+                    if (!count) return S_OK;
+                    if (text.size()+count>=text_limit) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+                    text.append(buffer,count);
+                }
+            };
+            if (SUCCEEDED(hr)) hr=read_all(whole.Get(),live);
+            if (FAILED(hr)) { emit(Error,hr); return; }
+            ComPtr<ITfRange> surrounding;
+            LONG shifted=0;
+            hr=whole->Clone(&surrounding);
+            if (SUCCEEDED(hr)) hr=surrounding->Collapse(cookie,TF_ANCHOR_START);
+            if (SUCCEEDED(hr)) hr=surrounding->ShiftStart(cookie,-static_cast<LONG>(text_limit-1),&shifted,nullptr);
+            if (SUCCEEDED(hr)) hr=read_all(surrounding.Get(),preview_before);
+            if (FAILED(hr)) { emit(Error,hr); return; }
+            hr=whole->Clone(&surrounding);
+            if (SUCCEEDED(hr)) hr=surrounding->Collapse(cookie,TF_ANCHOR_END);
+            if (SUCCEEDED(hr)) hr=surrounding->ShiftEnd(cookie,static_cast<LONG>(text_limit-1),&shifted,nullptr);
+            if (SUCCEEDED(hr)) hr=read_all(surrounding.Get(),preview_after);
+            if (FAILED(hr)) { emit(Error,hr); return; }
+            ComPtr<ITfContextView> context_view;
+            ComPtr<ITfRange> caret;
+            BOOL clipped=TRUE;
+            hr=edited->GetActiveView(&context_view);
+            if (SUCCEEDED(hr)) hr=whole->Clone(&caret);
+            if (SUCCEEDED(hr)) hr=caret->Collapse(cookie,TF_ANCHOR_END);
+            if (SUCCEEDED(hr)) hr=context_view->GetTextExt(cookie,caret.Get(),&preview_rect,&clipped);
+            if (FAILED(hr) || preview_rect.bottom<=preview_rect.top) {
+                // Some text stores reject empty ranges. Query the last glyph.
+                LONG shifted=0;
+                if (caret && context_view && SUCCEEDED(caret->ShiftStart(cookie,-1,&shifted,nullptr)) && shifted==-1)
+                    hr=context_view->GetTextExt(cookie,caret.Get(),&preview_rect,&clipped);
+            }
+            preview_position_valid=SUCCEEDED(hr) && !clipped &&
+                preview_rect.bottom>preview_rect.top && preview_rect.right>=preview_rect.left;
+        }
+        emit(Editing,S_OK,live,static_cast<DWORD>(current.size()),
+             current.empty()?0:current.front().started);
+        // A retired empty range is not the end of the live preview when the
+        // IME replaced its composition (e.g. Backspace followed by typing).
+        // The active snapshot above is authoritative for the whole context.
+        if (!current.empty()) {
+            previous=std::move(current);
+            return;
+        }
+#else
         emit(Editing,S_OK,L"",static_cast<DWORD>(current.size()));
+#endif
         for (auto& old:previous) {
             bool exists=std::any_of(current.begin(),current.end(),[&](const Range& now){return now.identity.Get()==old.identity.Get();});
             if (exists) continue;
@@ -242,6 +370,41 @@ public:
         previous=std::move(current);
     }
 };
+
+#ifdef KANA_LIVE_PREVIEW
+class PreviewLayoutRead final : public ITfEditSession {
+    std::atomic<ULONG> refs{1};
+    Observer* owner;
+    ComPtr<ITfContext> context;
+public:
+    explicit PreviewLayoutRead(Observer* value):owner(value),context(value->context) { owner->AddRef(); }
+    ~PreviewLayoutRead() { owner->layout_pending=false; owner->Release(); }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** result) override {
+        if (!result) return E_POINTER;
+        *result=nullptr;
+        if (iid!=IID_IUnknown && iid!=IID_ITfEditSession) return E_NOINTERFACE;
+        *result=static_cast<ITfEditSession*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { auto count=--refs; if (!count) delete this; return count; }
+    HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+        if (!owner->stopping() && owner->context.Get()==context.Get() && !owner->previous.empty()) {
+            Observer::Busy guard(owner->busy);
+            try { owner->read_edit(context.Get(),cookie); } catch (...) { owner->emit(Error,E_FAIL); }
+        }
+        return S_OK;
+    }
+};
+HRESULT Observer::OnLayoutChange(ITfContext* changed,int code,ITfContextView*) {
+    if (stopping() || changed!=context.Get() || code!=1 || previous.empty() || layout_pending)
+        return S_OK;
+    layout_pending=true;
+    ComPtr<ITfEditSession> session; session.Attach(new PreviewLayoutRead(this));
+    HRESULT result=E_FAIL;
+    context->RequestEditSession(preview_client,session.Get(),TF_ES_ASYNC|TF_ES_READ,&result);
+    return S_OK;
+}
+#endif
 
 LRESULT CALLBACK control_window(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam) {
     if (message==WM_NCCREATE) {
@@ -282,7 +445,13 @@ LRESULT CALLBACK ProbeHook(int code,WPARAM wparam,LPARAM lparam) {
 }
 
 // Check the packet layout before Python passes a buffer to PollProbe.
-extern "C" __declspec(dllexport) DWORD WINAPI ProbeProtocolVersion() { return 3; }
+extern "C" __declspec(dllexport) DWORD WINAPI ProbeProtocolVersion() {
+#ifdef KANA_LIVE_PREVIEW
+    return 5;
+#else
+    return 3;
+#endif
+}
 extern "C" __declspec(dllexport) BOOL WINAPI StartProbe(DWORD tid) {
     if (!tid || host_poisoned) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     if (host_mapping) { SetLastError(ERROR_ALREADY_EXISTS); return FALSE; }

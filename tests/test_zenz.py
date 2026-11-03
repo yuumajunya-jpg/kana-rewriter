@@ -14,9 +14,16 @@ class ZenzTests(unittest.TestCase):
         self.assertEqual(region.rebuild("いので、歯医者"), "歯が痛いので、歯医者に行く")
 
     def test_scan_stops_at_boundaries(self):
-        for boundary in ("。", "漢", "𠮷", "々", "カ", "ｶ", "ヽ", "ヾ", "ー", "ㇰ", "\n"):
+        for boundary in ("。", "漢", "𠮷", "々", "カ", "ｶ", "ヽ", "ヾ", "ㇰ", "\n"):
             line = "まえ" + boundary + "きょう"
             self.assertEqual(split_at_caret(line, len(line)).target, "きょう")
+
+    def test_shared_kana_marks_follow_preceding_script(self):
+        for word in ('ぷれびゅー', 'こーひー', 'か\u3099', 'は\u309a', 'ぷれびゅーー'):
+            self.assertEqual(split_at_caret(word, len(word)).target, word)
+        for word in ('コーヒー', 'カ\u3099', 'プレビュー'):
+            with self.assertRaises(ValueError):
+                split_at_caret(word, len(word))
 
     def test_default_boundary_preserves_other_characters(self):
         for middle in ("、", "?", "!", " ", "A"):

@@ -10,6 +10,7 @@ import sys
 import threading
 
 from .tsf import Packet
+from .notifications import NotificationPump
 
 logger = logging.getLogger(__name__)
 
@@ -110,25 +111,39 @@ class NativeEditProbe:
         self.tid, self.started = tid, False
         self.lock = threading.RLock()
         self.last_candidate = None
+        self.pump = None
 
     def start(self):
         with self.lock:
             if not self.dll.StartProbe(self.tid):
                 raise C.WinError(C.get_last_error())
             self.started = True
+        try:
+            self.pump = NotificationPump(self._poll, self._dropped)
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def drain(self):
+        events = self.pump.drain() if self.pump else []
+        for event in events:
+            if event['kind'] == 4:
+                self.last_candidate = event.copy()
+        return events
+
+    def _poll(self):
         with self.lock:
             events, packet = [], EditPacket()
             while self.dll.PollProbe(C.byref(packet)):
                 event = {name: getattr(packet, name) for name, _ in EditPacket._fields_}
                 events.append(event)
-                if event["kind"] == 4:
-                    self.last_candidate = event.copy()
             return events
 
     def dropped(self):
+        return self.pump.dropped() if self.pump else 0
+
+    def _dropped(self):
         with self.lock:
             return self.dll.DroppedProbe()
 
@@ -188,6 +203,9 @@ class NativeEditProbe:
             return output.left, output.right
 
     def close(self):
+        if self.pump is not None:
+            self.pump.close()
+            self.pump = None
         with self.lock:
             if not self.started:
                 return True

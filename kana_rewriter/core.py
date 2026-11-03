@@ -35,6 +35,7 @@ class Config:
     hotkey_selection: str = "Ctrl+Alt+J"
     hotkey_quit: str = ""
     auto_replace_on_ime_commit: bool = False
+    preview_enabled: bool = True
     tsf_monitor_path: str = ""
     ime_commit_backend: str = "uia"
     tsf_edit_path: str = ""
@@ -48,6 +49,8 @@ class Config:
     native_uia_wait: str = "poll"
 
     def __post_init__(self):
+        if type(self.preview_enabled) is not bool:
+            raise ValueError("preview_enabledは真偽値です")
         if type(self.auto_replace_on_ime_commit) is not bool:
             raise ValueError("auto_replace_on_ime_commitは真偽値です")
         if not isinstance(self.tsf_monitor_path, str):
