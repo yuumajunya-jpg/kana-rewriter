@@ -4,7 +4,7 @@
 
 ## zenz-v3.2-xsmall / Q5_K_M
 
-- ファイル: `models/zenz-v3.2-xsmall-Q5_K_M.gguf`
+- ファイル: `models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf`
 - SHA256: `00c64b3d318045a708d0cad5434faccab10f5481a49e6362864551fd0995fa58`
 - 作者: Miwa-Keita（azooKey）
 - 配布元: [Miwa-Keita/zenz-v3.2-xsmall-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-xsmall-gguf)
@@ -18,7 +18,7 @@ Apache License 2.0の条件に従い、ライセンス全文をこのファイ�
 
 ## jinen-v2-xsmall / Q5_K_M（同梱していません）
 
-モデルなし版で既定として案内しているモデルです。モデル同梱版には含まれません。利用する場合は`README.md`の手順4で取得してください。
+代替モデルとして利用できます。今回のモデル同梱版には含まれません。取得・設定方法はモデル資料を参照してください。
 
 - SHA256: `24ff3af5db712fbbb4aa9254ee28ec4d731207134471ab68b06c1828726284c2`
 - 作者: Hitoshi Togasaki
