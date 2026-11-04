@@ -134,7 +134,7 @@ class ZenzTests(unittest.TestCase):
         self.assertEqual(jinen_prompt("はいしゃ", "歯が痛いので、"),
                          "\uee02歯が痛いので、\uee00ハイシャ\uee01")
         self.assertEqual(jinen_prompt("きょう"), "\uee02\uee00キョウ\uee01")
-        client = Converter(Config())
+        client = Converter(Config(model_format="jinen_v1"))
         client.llm = Mock()
         client.llm.create_completion.return_value = {
             "choices": [{"text": "歯医者", "finish_reason": "stop"}]}

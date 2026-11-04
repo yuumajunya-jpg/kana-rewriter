@@ -42,7 +42,7 @@ class SnapshotTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows only")
 class EngineTests(unittest.TestCase):
-    def test_commit_capture_uses_uia_selection_then_unicode_send_and_readback(self):
+    def test_selection_uses_uia_then_unicode_send_and_readback(self):
         from kana_rewriter.direct import EditorEngine
         editor, model = UiaRangeTests().prepare()
         model.text = "- さんぽ"
@@ -71,7 +71,8 @@ class EngineTests(unittest.TestCase):
                 patch("kana_rewriter.direct_uia.input_tick", return_value=10), \
                 patch("kana_rewriter.direct_uia.check_input_ready"), \
                 patch("kana_rewriter.direct_uia.send", side_effect=deliver):
-            capture = engine.capture("commit", 1000, committed_text="さんぽ")
+            model.selected = Range(model, 2, 5)
+            capture = engine.capture("selection", 1000)
             self.assertTrue(engine.apply(capture, "散歩"))
         self.assertEqual(model.text, "- 散歩")
         self.assertEqual(len(batches), 1)

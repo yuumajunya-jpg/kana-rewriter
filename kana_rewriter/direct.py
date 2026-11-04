@@ -45,13 +45,9 @@ class EditorEngine:
         return self.automation.focused_editor(self.config)
 
     @stage("取得/全体")
-    def capture(self, mode, max_chars, trigger_keys=(), committed_text=None, expected_target=None, expected_runtime=None):
+    def capture(self, mode, max_chars, trigger_keys=()):
         from .direct_win32 import window_identity, input_tick, check_input_ready
         target = window_identity()
-        if expected_target is not None and target != expected_target:
-            raise RuntimeError("TSF通知後に入力先が変わりました")
-        if expected_runtime is not None and self.focus_runtime() != expected_runtime:
-            raise RuntimeError("TSF試験開始時と異なる入力欄です")
         # Reading does not synthesize input: inference can begin on key-down.
         check_input_ready(target[1], allow_modifiers=True)
         tick = input_tick()
@@ -70,11 +66,9 @@ class EditorEngine:
             raise RuntimeError("本文の取得中に本文または選択位置が変わったため中止しました")
         if window_identity() != target:
             raise RuntimeError("本文の取得中に入力先が変わったため中止しました")
-        if expected_runtime is not None and self.focus_runtime() != expected_runtime:
-            raise RuntimeError("本文取得中に入力欄が変わりました")
         self.counter += 1
         try:
-            capture = make_capture(state, (target, tick), mode, self.config, self.counter, committed_text)
+            capture = make_capture(state, (target, tick), mode, self.config, self.counter)
         except ValueError as exc:
             raise ValueError(f"{exc}（{editor.kind}: 取得本文{len(state.text)}文字、"
                              f"カーソル/選択{state.start}:{state.end}。--debugで取得内容を確認）") from exc
@@ -88,14 +82,6 @@ class EditorEngine:
                      editor.kind, capture.source, capture.left_context[-self.config.context_chars:],
                      capture.right_context[:self.config.context_chars])
         return capture
-
-    def focus_runtime(self):
-        from .direct_uia import text_provider
-        if self.automation is None:
-            from .direct_uia import Automation
-            self.automation = Automation()
-        element, _ = text_provider(self.automation, self.automation.client.GetFocusedElement())
-        return tuple(element.GetRuntimeId())
 
     @stage("適用/全体（IME復元を含む）")
     def apply(self, capture, result):
@@ -277,14 +263,6 @@ class Desktop:
 
     def capture(self, mode, max_chars, trigger_keys=()):
         return self._call("capture", mode, max_chars, trigger_keys)
-
-    def capture_commit(self, text, target, runtime=None):
-        # Enter has already committed through TSF. Do not wait for its key-up;
-        # the editor state, focus, and IME checks still gate the replacement.
-        return self._call("capture", "commit", self.config.max_chars, (), text, target, runtime)
-
-    def focus_runtime(self):
-        return self._call("focus_runtime")
 
     def warmup(self):
         return self._call("warmup")

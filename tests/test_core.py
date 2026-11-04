@@ -44,28 +44,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(client.convert_selection("今日。ABC 123\n"), "今日。ABC 123\n")
             convert.assert_not_called()
 
-    def test_sentence_rebuild_keeps_existing_kanji_in_place(self):
-        from kana_rewriter.text import split_at_caret
-        source = "今日はいい天気だ。さんぽでもしようか"
-        desktop = Mock()
-        captured = Capture(source, ("window", 1, 2), split_at_caret(source, len(source)))
-        desktop.stamp.return_value = captured.stamp
-        desktop.copy_selection.return_value = source
-        self.assertEqual(captured.source, "さんぽでもしようか")
-        self.assertTrue(apply_result(desktop, captured, "散歩でもしようか"))
-        desktop.replace.assert_called_once_with("今日はいい天気だ。散歩でもしようか", "window",
-                                              caret=len("今日はいい天気だ。散歩でもしようか"))
 
-    def test_caret_stays_after_punctuation_and_before_suffix(self):
-        from kana_rewriter.text import split_at_caret
-        source = "前。さんぽ?!後ろ"
-        original_caret = len("前。さんぽ?!")
-        desktop = Mock()
-        captured = Capture(source, ("window", 1, 2), split_at_caret(source, original_caret), original_caret)
-        desktop.stamp.return_value = captured.stamp
-        desktop.copy_selection.return_value = source
-        apply_result(desktop, captured, "散歩")
-        desktop.replace.assert_called_once_with("前。散歩?!後ろ", "window", caret=len("前。散歩?!"))
 
     def test_direct_model_is_cached_and_uses_chat_api(self):
         with tempfile.NamedTemporaryFile(suffix=".gguf") as file:
@@ -130,31 +109,14 @@ class CoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 client.convert("きょう")
 
-    def test_changes_cancel_replacement(self):
-        desktop = Mock()
-        captured = Capture("きょう", ("window", 1, 2))
-        desktop.stamp.return_value = ("other", 1, 2)
-        with self.assertRaises(RuntimeError):
-            apply_result(desktop, captured, "今日")
-        desktop.copy_selection.assert_not_called()
-        desktop.replace.assert_not_called()
 
-    def test_changed_selection_cancels(self):
-        desktop = Mock()
-        captured = Capture("きょう", ("window", 1, 2))
-        desktop.stamp.return_value = captured.stamp
-        desktop.copy_selection.return_value = "あした"
-        with self.assertRaises(RuntimeError):
-            apply_result(desktop, captured, "今日")
-        desktop.replace.assert_not_called()
 
-    def test_matching_selection_is_replaced(self):
+
+    def test_missing_edit_token_cannot_use_legacy_editing(self):
         desktop = Mock()
-        captured = Capture("きょう", ("window", 1, 2))
-        desktop.stamp.return_value = captured.stamp
-        desktop.copy_selection.return_value = captured.text
-        self.assertTrue(apply_result(desktop, captured, "今日"))
-        desktop.replace.assert_called_once_with("今日", "window")
+        with self.assertRaisesRegex(RuntimeError, "編集トークン"):
+            apply_result(desktop, Capture("きょう", None), "今日")
+        self.assertEqual(desktop.mock_calls, [])
 
     def test_unchanged_does_not_touch_editor(self):
         desktop = Mock()

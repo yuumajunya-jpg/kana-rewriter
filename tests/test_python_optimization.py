@@ -16,15 +16,14 @@ class ComparisonCliTests(unittest.TestCase):
             converter.convert_selection("べつ", "", "")
 
     def test_comparison_does_not_construct_or_load_model(self):
-        args = ["kana_rewriter", "--config", "config.toml", "--editor-worker", "python", "--benchmark-source", "さんぽ",
+        args = ["kana_rewriter", "--config", "config.toml", "--benchmark-source", "さんぽ",
                 "--benchmark-result", "散歩"]
         with patch.object(sys, "argv", args), patch("kana_rewriter.__main__.Converter") as model, \
-                patch("kana_rewriter.__main__.Config.load", return_value=Config(editor_worker="native")), \
+                patch("kana_rewriter.__main__.Config.load", return_value=Config()), \
                 patch("kana_rewriter.__main__.run_windows", return_value=0) as run:
             self.assertEqual(main(), 0)
         model.assert_not_called()
         self.assertIsInstance(run.call_args.args[0], FixedConverter)
-        self.assertEqual(run.call_args.args[1].editor_worker, "python")
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows UIA")

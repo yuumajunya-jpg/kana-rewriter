@@ -32,8 +32,7 @@ def tsf_artifact(directory, source, build_script):
 def package(output, model, model_format=None, model_name=None):
     if sys.platform != "win32" or struct.calcsize("P") != 8 or sys.implementation.name != "cpython":
         raise RuntimeError("Run with 64-bit Windows CPython from the working environment")
-    artifacts = [tsf_artifact("tsf-probe", "tsf_probe.cpp", "build_tsf_probe.ps1"),
-                 tsf_artifact("tsf-edit-probe", "tsf_edit_probe.cpp", "build_tsf_edit_probe.ps1"),
+    artifacts = [tsf_artifact("tsf-edit-probe", "tsf_edit_probe.cpp", "build_tsf_edit_probe.ps1"),
                  tsf_artifact("tsf-preview", "tsf_probe.cpp", "build_preview.ps1")]
     if model and not model.is_file():
         raise FileNotFoundError(model)

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from kana_rewriter.auto_ime import CommitState, Focus, AutoImeMonitor, tick_count, FOCUS_RETRY_MS
 from kana_rewriter.core import Config
-from kana_rewriter.tsf import probe_path
+from kana_rewriter.tsf_edit import edit_probe_path as probe_path
 
 
 FIELD = Focus((1, 2, 3), (10,), 4)
@@ -18,11 +18,11 @@ FIELD = Focus((1, 2, 3), (10,), 4)
 def event(kind, **values):
     return {**dict(kind=kind, pid=3, tid=4, hwnd=2, tick=100, key=13,
                    active=0, modifiers=0, hr=0, generation=1,
-                   composition_tick=90, text="さんぽ"), **values}
+                   composition_tick=90, text="さんぽ", commit_id=1, revision=185), **values}
 
 
 def commit_events():
-    return [event(8, key=83), event(3, active=1), event(8), event(3), event(4)]
+    return [event(2, tick=0), event(8, key=83), event(3, active=1), event(8), event(3), event(4)]
 
 
 class SettingsTests(unittest.TestCase):
@@ -31,19 +31,18 @@ class SettingsTests(unittest.TestCase):
         Config(auto_replace_on_ime_commit=True)
         for options in ({"auto_replace_on_ime_commit": 1},
                         {"auto_replace_on_ime_commit": "true"},
-                        {"auto_replace_on_ime_commit": True, "editor_worker": "native"},
                         {"auto_replace_on_ime_commit": True, "edit_backend": "clipboard"},
-                        {"tsf_monitor_path": None}):
+                        {"tsf_edit_path": None}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Config(**options)
 
     def test_settings_load_and_dll_path_resolves_relative_to_config(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
-            path.write_text('auto_replace_on_ime_commit = true\ntsf_monitor_path = "monitor.dll"\n', encoding="utf-8")
+            path.write_text('auto_replace_on_ime_commit = true\ntsf_edit_path = "monitor.dll"\n', encoding="utf-8")
             config = Config.load(str(path))
             self.assertTrue(config.auto_replace_on_ime_commit)
-            self.assertEqual(config.tsf_monitor_path, str(Path(directory) / "monitor.dll"))
+            self.assertEqual(config.tsf_edit_path, str(Path(directory) / "monitor.dll"))
 
     @unittest.skipUnless(sys.platform == "win32", "Windows")
     def test_cli_enable_and_disable_override_saved_setting(self):
@@ -62,7 +61,6 @@ class SettingsTests(unittest.TestCase):
 class FocusIdentityTests(unittest.TestCase):
     def test_child_changes_preserve_document_identity_and_readonly_is_rechecked(self):
         from kana_rewriter.auto_ime import FocusReader
-        from kana_rewriter.direct import EditorEngine
         reader = FocusReader.__new__(FocusReader)
         reader.automation = automation = Mock()
         reader.checked = 3
@@ -85,16 +83,13 @@ class FocusIdentityTests(unittest.TestCase):
             original = reader.read()
             self.assertEqual(original.runtime, (100,))
             self.assertEqual(reader.read(), original)
-            engine = EditorEngine(Config())
-            engine.automation = automation
-            self.assertEqual(engine.focus_runtime(), original.runtime)
             value.CurrentIsReadOnly = True
             self.assertIsNone(reader.read())
 
 
 class NativeContextStateTests(unittest.TestCase):
     def state(self):
-        state = CommitState(native_context=True)
+        state = CommitState()
         state.track(FIELD, 1)
         state.observe([event(2, tick=10)], 10)
         return state
@@ -132,11 +127,11 @@ class NativeContextStateTests(unittest.TestCase):
         self.assertIsNone(state.take(110))
 
     def test_context_and_native_range_are_required(self):
-        state = CommitState(native_context=True)
+        state = CommitState()
         state.track(FIELD, 1)
         state.observe([self.candidate()], 100)
         self.assertIsNone(state.take(100))
-        state.observe([event(2, tick=10), event(4)], 100)
+        state.observe([event(2, tick=10), event(4, commit_id=0, revision=0)], 100)
         self.assertIsNone(state.take(100))
 
     def test_real_target_change_loss_and_input_still_reject(self):
@@ -158,29 +153,29 @@ class NativeContextStateTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
-    def test_converted_commit_is_not_queued_for_either_backend(self):
-        for native_context in (False, True):
-            for text in ('コーヒーをのむ', '今日はいいてんき'):
-                with self.subTest(native_context=native_context, text=text):
-                    state = CommitState(native_context=native_context)
-                    state.track(FIELD, 1)
-                    state.observe([event(4, text=text, commit_id=1, revision=185)], 100)
-                    self.assertIsNone(state.take(100))
+    def test_converted_commit_is_not_queued(self):
+        for text in ('コーヒーをのむ', '今日はいいてんき'):
+            with self.subTest(text=text):
+                state = CommitState()
+                state.track(FIELD, 1)
+                state.observe([event(2, tick=10), event(4, text=text)], 100)
+                self.assertIsNone(state.take(100))
 
     def setUp(self):
         self.state = CommitState()
         self.state.track(FIELD)
+        self.state.observe([event(2, tick=0)], 0)
 
     def test_field_runtime_change_logs_identity_without_relaxing_safety(self):
         changed = Focus(FIELD.target, (99,), FIELD.tid)
         with self.assertLogs('kana_rewriter.auto_ime', level='DEBUG') as logs:
             self.state.track(changed, 110)
-        self.assertIn('TSF入力先変更:', '\n'.join(logs.output))
-        self.assertEqual(self.state.accept_since, 110)
+        self.assertIn('TSF入力先のUIA表現変更:', '\n'.join(logs.output))
+        self.assertEqual(self.state.accept_since, 0)
         self.assertEqual(self.state.focus, changed)
 
     def test_commit_before_focus_acceptance_logs_actual_rejection(self):
-        self.state.track(Focus(FIELD.target, (99,), FIELD.tid), 110)
+        self.state.observe([event(2, tick=110)], 110)
         with self.assertLogs('kana_rewriter.auto_ime', level='DEBUG') as logs:
             self.state.observe([event(4, tick=120, composition_tick=100)], 120)
         self.assertIn('TSF確定破棄: 確定開始が受付期間外', '\n'.join(logs.output))
@@ -203,6 +198,7 @@ class StateTests(unittest.TestCase):
         self.state.observe(commit_events()[:-1] + [event(5)], 100)
         self.assertIsNone(self.state.take(100))
         self.state.track(Focus((1, 2, 3), (20,), 4), 110)
+        self.state.observe([event(2, tick=110)], 110)
         self.state.observe([event(4)], 100)
         self.assertIsNone(self.state.take(100))
 
@@ -211,7 +207,7 @@ class StateTests(unittest.TestCase):
         commit = self.state.take(100)
         self.assertTrue(self.state.begin(commit))
         self.assertTrue(self.state.valid(commit))
-        self.state.track(Focus(FIELD.target, (99,), FIELD.tid))
+        self.state.track(Focus((1, 9, 3), (99,), FIELD.tid))
         self.assertFalse(self.state.valid(commit))
 
     def test_editing_input_after_capture_invalidates_inference(self):
@@ -296,7 +292,7 @@ class StateTests(unittest.TestCase):
             worker.join(2)
 
     def test_persistent_focus_failure_or_confirmed_switch_cannot_recover_result(self):
-        for recovery in (None, Focus(FIELD.target, (99,), FIELD.tid), 'timeout', 'late'):
+        for recovery in (None, Focus((1, 9, 3), (99,), FIELD.tid), 'timeout', 'late'):
             with self.subTest(recovery=recovery):
                 state = CommitState()
                 state.track(FIELD)
@@ -350,11 +346,12 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(self.state.take(100))
 
     def test_composition_started_in_old_field_is_rejected_even_if_commit_is_new(self):
-        self.state.track(Focus(FIELD.target, (99,), FIELD.tid), 500)
+        self.state.observe([event(2, tick=500)], 500)
         self.state.observe(commit_events(), 600)
         self.assertIsNone(self.state.take(600))
         self.state.observe([event(4, tick=600, composition_tick=400)], 600)
         self.assertIsNone(self.state.take(600))
+        self.state.observe([event(2, tick=500)], 500)
         self.state.observe([event(4, tick=700, composition_tick=650)], 700)
         self.assertEqual(self.state.take(700).text, "さんぽ")
 
@@ -379,7 +376,7 @@ class WatcherTests(unittest.TestCase):
         probe.start.return_value = probe
         probe.close.return_value = True
         probe.dropped.return_value = 0
-        monitor = AutoImeMonitor(Config(ime_commit_backend='tsf'), Mock(),
+        monitor = AutoImeMonitor(Config(), Mock(),
                                  reader_factory=lambda: reader, probe_factory=lambda *args: probe)
         changed = Focus(FIELD.target, (-109666,), FIELD.tid)
         reader.now.return_value = 1
@@ -467,12 +464,12 @@ class WatcherTests(unittest.TestCase):
         new_probe.dropped.return_value = 0
         old_probe.drain.return_value = [event(4, text='欠落したバッチ')]
         new_probe.drain.side_effect = [
-            [event(1), event(4, tick=155, composition_tick=110, text='ふるいにゅうりょく'),
+            [event(1), event(2, tick=130), event(4, tick=155, composition_tick=110, text='ふるいにゅうりょく'),
              event(4, tick=155, composition_tick=150, text='あたらしいにゅうりょく')], []]
         factory = Mock(side_effect=[old_probe, new_probe])
         monitor = AutoImeMonitor(Config(), Mock(), reader_factory=lambda: reader, probe_factory=factory)
         monitor.state.track(FIELD, 0)
-        monitor.state.observe([event(4)], 100)
+        monitor.state.observe([event(2, tick=0), event(4)], 100)
         previous_edit = monitor.state.take(100)
         observed, reads = [], 0
         def read():
@@ -628,7 +625,7 @@ class WatcherTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")
 class NormalLoopTests(unittest.TestCase):
-    def run_loop(self, commit=True, valid=True, manual=False, backend='uia', failure=None, capture_failure=None, close_failure=None):
+    def run_loop(self, commit=True, valid=True, manual=False, failure=None, capture_failure=None, close_failure=None):
         from kana_rewriter.__main__ import run_windows
         from kana_rewriter import winapi as win
         calls = 0
@@ -655,7 +652,6 @@ class NormalLoopTests(unittest.TestCase):
                 patch.object(win.user, "PeekMessageW", side_effect=messages), \
                 patch.object(win, "MessageWaiter"), \
                 patch("kana_rewriter.auto_ime.AutoImeMonitor") as monitor, \
-                patch("kana_rewriter.auto_ime.capture_commit", return_value="capture") as capture, \
                 patch("kana_rewriter.direct.Desktop") as desktop, \
                 patch('kana_rewriter.tsf_edit.TsfCommitEditor') as tsf_editor, \
                 patch("kana_rewriter.__main__.ThreadPoolExecutor") as pool, \
@@ -665,14 +661,13 @@ class NormalLoopTests(unittest.TestCase):
             monitor.return_value.begin.return_value = True
             monitor.return_value.valid.side_effect = [True, valid]
             pool.return_value.submit.return_value = future
-            desktop.return_value.capture_commit.return_value = 'capture'
             tsf_editor.return_value.capture.side_effect = capture_failure
             tsf_editor.return_value.apply.return_value = True
             tsf_editor.return_value.apply.side_effect = failure
             from kana_rewriter.tsf_edit import RestartRequired
-            expected_code = int(backend == 'tsf' and not manual and (isinstance(capture_failure,RestartRequired) or valid and isinstance(failure,RestartRequired)))
+            expected_code = int(not manual and (isinstance(capture_failure,RestartRequired) or valid and isinstance(failure,RestartRequired)))
             settings=Config(auto_replace_on_ime_commit=True,hotkey_line="F8",
-                            hotkey_quit="Ctrl+Alt+Q",ime_commit_backend=backend)
+                            hotkey_quit="Ctrl+Alt+Q")
             if close_failure:
                 with self.assertRaisesRegex(type(close_failure),str(close_failure)):
                     run_windows(Mock(),settings)
@@ -680,19 +675,12 @@ class NormalLoopTests(unittest.TestCase):
                 self.assertEqual(run_windows(Mock(),settings),expected_code)
             if manual:
                 desktop.return_value.capture.assert_called_once()
-                capture.assert_not_called()
                 apply.assert_called_once()
                 tsf_editor.return_value.apply.assert_not_called()
             elif commit:
-                if backend == 'tsf':
-                    desktop.return_value.capture_commit.assert_not_called()
-                    tsf_editor.return_value.capture.assert_called_once()
-                    capture.assert_not_called()
-                    apply.assert_not_called()
-                    self.assertEqual(tsf_editor.return_value.apply.call_count, int(valid and capture_failure is None))
-                else:
-                    capture.assert_called_once()
-                    self.assertEqual(apply.call_count, int(valid))
+                tsf_editor.return_value.capture.assert_called_once()
+                apply.assert_not_called()
+                self.assertEqual(tsf_editor.return_value.apply.call_count, int(valid and capture_failure is None))
             self.assertEqual(win.user.UnregisterHotKey.call_count,win.user.RegisterHotKey.call_count)
             monitor.return_value.close.assert_called_once()
             desktop.return_value.close.assert_called_once()
@@ -701,17 +689,14 @@ class NormalLoopTests(unittest.TestCase):
     def test_normal_startup_processes_commit_and_applies(self): self.run_loop()
     def test_input_during_inference_prevents_application(self): self.run_loop(valid=False)
     def test_manual_shortcut_can_be_used_with_auto_enabled(self): self.run_loop(manual=True)
-    def test_tsf_auto_commit_uses_direct_edit_without_uia_write(self): self.run_loop(backend='tsf')
-    def test_tsf_inference_change_prevents_edit(self): self.run_loop(backend='tsf', valid=False)
-    def test_tsf_manual_shortcut_retains_existing_backend(self): self.run_loop(backend='tsf', manual=True)
-    def test_tsf_failure_does_not_fallback(self): self.run_loop(backend='tsf', failure=RuntimeError('rejected'))
+    def test_tsf_failure_does_not_fallback(self): self.run_loop(failure=RuntimeError('rejected'))
     def test_monitor_cleanup_failure_still_closes_executor_and_desktop(self):
         self.run_loop(close_failure=RuntimeError('close failed'))
 
     def test_tsf_capture_timeout_exits_and_closes(self):
         from kana_rewriter.tsf_edit import RestartRequired
-        self.run_loop(backend='tsf',capture_failure=RestartRequired('capture timeout'))
+        self.run_loop(capture_failure=RestartRequired('capture timeout'))
 
     def test_tsf_unknown_result_exits_and_closes(self):
         from kana_rewriter.tsf_edit import RestartRequired
-        self.run_loop(backend='tsf', failure=RestartRequired('unknown'))
+        self.run_loop(failure=RestartRequired('unknown'))

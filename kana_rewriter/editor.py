@@ -10,7 +10,7 @@ def utf16_length(text):
 
 
 def simple_caret_text(text):
-    """Conservative navigation set shared in meaning with the C++ worker."""
+    """Conservative character set for restoring a caret by key navigation."""
     return all(0x20 <= ord(c) <= 0x7e or c in "\n\r\t" or
                0x3041 <= ord(c) <= 0x3096 or 0x30a1 <= ord(c) <= 0x30fc or
                0x3400 <= ord(c) <= 0x9fff or c in "　。、！，．？" for c in text)
@@ -33,15 +33,10 @@ class TextState:
     end: int
 
 
-def make_capture(state, stamp, mode, config, token, committed_text=None):
+def make_capture(state, stamp, mode, config, token):
     if not 0 <= state.start <= state.end <= len(state.text):
         raise RuntimeError("入力欄の選択位置が不正です")
-    if mode == "commit":
-        if (not committed_text or state.start != state.end or state.end < len(committed_text)
-                or state.text[state.end - len(committed_text):state.end] != committed_text):
-            raise RuntimeError("TSF確定文字列と本文・カーソルが一致しません")
-        region = TextRegion(state.text[:state.end - len(committed_text)], committed_text, state.text[state.end:])
-    elif mode == "line":
+    if mode == "line":
         if state.start != state.end:
             raise RuntimeError("範囲が選択されています。選択範囲モードを使用してください")
         region = split_at_caret(state.text, state.end, config.conversion_delimiters,

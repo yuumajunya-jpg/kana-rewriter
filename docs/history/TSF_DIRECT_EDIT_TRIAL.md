@@ -1,3 +1,5 @@
+> 過去の調査記録です。記載された方式・コマンドには廃止済みのものがあります。現行仕様は[README](../../README.md)と[アーキテクチャ](../ARCHITECTURE.md)を参照してください。
+
 # TSF直接編集の実現性試験
 
 ブランチ：`codex/tsf-direct-edit-feasibility`。

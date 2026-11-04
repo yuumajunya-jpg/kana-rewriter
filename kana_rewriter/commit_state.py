@@ -40,8 +40,7 @@ class Commit:
 
 class CommitState:
     """Bounded mailbox plus an edit/focus revision for in-flight inference."""
-    def __init__(self, native_context=False):
-        self.native_context = native_context
+    def __init__(self):
         self.context_generation = None
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
@@ -56,12 +55,12 @@ class CommitState:
         self.accept_since = 0
 
     def same_focus(self, first, second):
-        """UIA identifies UIA edits; TSF identifies its own retained ranges.
+        """TSF identifies its own retained ranges independently of UIA RuntimeId.
 
         Matching HWND/TID only keeps the subscription. Authorization additionally
         requires a known TSF context generation and an immutable native range.
         """
-        if self.native_context and first is not None and second is not None:
+        if first is not None and second is not None:
             return first.target == second.target and first.tid == second.tid
         return first == second
 
@@ -113,21 +112,20 @@ class CommitState:
                         logger.debug("TSF確定判定: 入力先不一致 / pid=%s tid=%s / focus=%r",
                                      event["pid"], event["tid"], self.focus)
                     continue
-                if self.native_context:
-                    if event['kind'] == 2:
-                        self.context_generation = event['generation'] if event['hr'] == 0 else None
-                        self.accept_since = max(self.accept_since, event['tick'])
-                    elif event['kind'] in (6, 7, 9):
-                        self.context_generation = None
-                    elif event['kind'] != 1 and (
-                            self.context_generation is None
-                            or event['generation'] != self.context_generation):
-                        self.revision += 1
-                        self.pending = None
-                        self.changed.notify_all()
-                        logger.debug('TSF通知を拒否: 文脈世代不一致 / kind=%s generation=%s expected=%s',
-                                     event['kind'], event['generation'], self.context_generation)
-                        continue
+                if event['kind'] == 2:
+                    self.context_generation = event['generation'] if event['hr'] == 0 else None
+                    self.accept_since = max(self.accept_since, event['tick'])
+                elif event['kind'] in (6, 7, 9):
+                    self.context_generation = None
+                elif event['kind'] != 1 and (
+                        self.context_generation is None
+                        or event['generation'] != self.context_generation):
+                    self.revision += 1
+                    self.pending = None
+                    self.changed.notify_all()
+                    logger.debug('TSF通知を拒否: 文脈世代不一致 / kind=%s generation=%s expected=%s',
+                                 event['kind'], event['generation'], self.context_generation)
+                    continue
                 if invalidates_commit(event):
                     if self.pending is not None:
                         logger.debug("TSF確定判定: 保留確定を破棄 / event=%s key=%s / revision=%s",
@@ -140,7 +138,7 @@ class CommitState:
                         logger.debug("TSF確定判定: 受付停止 / closed=%s busy=%s", self.closed, self.busy)
                     continue
                 valid, reason = eligible(event, now, self.focus.target)
-                if valid and self.native_context and not (event.get('commit_id') and event.get('revision')):
+                if valid and not (event.get('commit_id') and event.get('revision')):
                     valid, reason = False, 'native_range_missing'
                 if event["kind"] == 4:
                     logger.debug("TSF確定範囲: text=%r / commit_id=%s / native_revision=%s / focus=%r",
@@ -151,8 +149,7 @@ class CommitState:
                                  self.accept_since, self.revision)
                 if valid and self.accept_since <= event["composition_tick"] <= event["tick"]:
                     text = event["text"].replace("\r\n", "\n").replace("\r", "\n")
-                    native_range = ((event['commit_id'], event['revision'], event['text'])
-                                    if 'commit_id' in event and 'revision' in event else None)
+                    native_range = (event['commit_id'], event['revision'], event['text'])
                     self.pending = Commit(text, self.focus, event["tick"], self.revision, native_range)
                 elif valid:
                     logger.debug("TSF確定破棄: 確定開始が受付期間外 / composition_tick=%s "
@@ -220,5 +217,3 @@ class CommitState:
             self.pending = None
             self.revision += 1
             self.changed.notify_all()
-
-

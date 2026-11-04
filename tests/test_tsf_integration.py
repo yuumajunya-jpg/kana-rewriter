@@ -46,7 +46,7 @@ class RuntimeChurnIntegrationTests(unittest.TestCase):
             original = Focus((fixture.hwnd, 0, fixture.pid), (40389,), fixture.tid)
             reader.current = original
             editor = TsfCommitEditor()
-            monitor = AutoImeMonitor(Config(ime_commit_backend='tsf'), lambda: None,
+            monitor = AutoImeMonitor(Config(), lambda: None,
                                      reader_factory=lambda: reader,
                                      probe_factory=editor.probe_factory).start()
             try:
@@ -101,33 +101,8 @@ class IntegrationSettingsTests(unittest.TestCase):
         probe.replace.assert_called_once()
         self.assertEqual(diagnostic_reason(0), 'unavailable')
 
-    def test_paragraph_start_commit_matches_without_offset_guessing(self):
-        from kana_rewriter.editor import TextState, make_capture
-        for separator in ('\n', '\r\n', '\r', '\u2029'):
-            for prefix in ('前の行', '😀前の行'):
-                with self.subTest(separator=repr(separator), prefix=prefix):
-                    left = prefix + separator
-                    text = left + 'さんぽ'
-                    captured = make_capture(TextState(text, len(text), len(text)),
-                                            None, 'commit', Config(), 1, 'さんぽ')
-                    self.assertEqual(captured.source, 'さんぽ')
-                    self.assertEqual(captured.region.left, left)
 
-    def test_cli_overrides_config_backend_for_normal_startup(self):
-        from kana_rewriter.__main__ import main
-        with patch('sys.argv', ['kana_rewriter', '--config', 'config.toml', '--ime-commit-backend', 'tsf']), \
-                patch('kana_rewriter.__main__.Config.load', return_value=Config(backend='http')), \
-                patch('kana_rewriter.__main__.Converter'), \
-                patch('kana_rewriter.__main__.run_windows', return_value=0) as run:
-            self.assertEqual(main(), 0)
-        self.assertEqual(run.call_args.args[1].ime_commit_backend, 'tsf')
 
-    def test_default_preserves_old_config_and_new_mode_validates(self):
-        self.assertEqual(Config().ime_commit_backend, 'uia')
-        self.assertEqual(Config(ime_commit_backend='tsf').ime_commit_backend, 'tsf')
-        for value in (None, [], 'auto'):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                Config(ime_commit_backend=value)
 
     def test_relative_edit_dll_path_resolves_against_config(self):
         with tempfile.TemporaryDirectory() as directory:

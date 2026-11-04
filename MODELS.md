@@ -2,7 +2,7 @@
 
 ## 現在のモデル（2026-10-04）
 
-通常の設定例と直近の速度計測は**jinen-v2-xsmall / Q5_K_M**を使用する。ファイルは28,261,056 bytes（約28.3MB）。利用者環境のファイルのSHA256が[配布元の固定コミット](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/commit/b91eac974998a37423ca8a1198fd7c5631b06e57)と一致することを確認した。
+現行の既定モデルはzenz-v3.2-xsmall / Q5_K_M。過去の速度計測では**jinen-v2-xsmall / Q5_K_M**を使用した。ファイルは28,261,056 bytes（約28.3MB）。利用者環境のファイルのSHA256が[配布元の固定コミット](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/commit/b91eac974998a37423ca8a1198fd7c5631b06e57)と一致することを確認した。
 
 ```cmd
 .\.venv\Scripts\hf.exe download togatogah/jinen-v2-xsmall.gguf jinen-v2-xsmall-Q5_K_M.gguf --revision b91eac974998a37423ca8a1198fd7c5631b06e57 --local-dir models
@@ -58,7 +58,7 @@ model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
 model_format = "zenz_v3_2"
 ```
 
-azooKeyのllama.cppフォークの`llama-server`を使う場合は、公式GGUFのまま`backend = "http"`で接続します。ビルド済みバイナリの入手と起動の手順は[READMEのzenz-v3.2-xsmallの節](README.md#zenz-v32-xsmallを使う場合)を参照してください。
+azooKeyのllama.cppフォークの`llama-server`を使う場合は、公式GGUFのまま`backend = "http"`で接続します。azooKeyの[llama.cppリリースb4846](https://github.com/azooKey/llama.cpp/releases/tag/b4846)のWindowsバイナリーで動作確認済みです。展開先で`llama-server.exe -m <GGUFのパス> --host 127.0.0.1 --port 8080 -c 1024`を実行し、サーバー起動後にアプリを起動します。
 
 ```toml
 backend = "http"

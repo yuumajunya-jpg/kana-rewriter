@@ -57,8 +57,6 @@ def main():
     parser.add_argument("--diagnostic-log", nargs="?", const="", metavar="PATH",
                         help="詳細診断と端末出力をUTF-8ログへ保存（省略時logs/へ自動命名）")
     parser.add_argument("--inspect", action="store_true", help="3秒後の入力欄の直接編集能力を表示（文字変更なし）")
-    parser.add_argument("--editor-worker", choices=("python", "native"), help="設定ファイルの編集ワーカーを今回だけ上書き")
-    parser.add_argument('--ime-commit-backend', choices=('uia', 'tsf'), help='IME確定後の置換方式を今回だけ上書き')
     parser.add_argument("--auto-replace-on-ime-commit", action=argparse.BooleanOptionalAction, default=None,
                         help="TSFによるEnter確定後の自動変換を今回だけ切り替え（Python直接編集のみ）")
     parser.add_argument("--benchmark-source", help="AIなし比較用の変換対象（完全一致時のみ置換）")
@@ -93,27 +91,18 @@ def _run(args, benchmarking):
     try:
         config = Config.load(args.config) if args.config else Config()
         overrides = {}
-        if args.editor_worker:
-            overrides["editor_worker"] = args.editor_worker
-        if args.ime_commit_backend:
-            overrides['ime_commit_backend'] = args.ime_commit_backend
         if args.auto_replace_on_ime_commit is not None:
             overrides["auto_replace_on_ime_commit"] = args.auto_replace_on_ime_commit
         if overrides:
             config = replace(config, **overrides)
-        logger.debug("診断設定: edit_backend=%s / editor_worker=%s / auto_ime=%s / timeout=%s",
-                     config.edit_backend, config.editor_worker,
+        logger.debug("診断設定: edit_backend=%s / auto_ime=%s / timeout=%s",
+                     config.edit_backend,
                      config.auto_replace_on_ime_commit, config.editor_timeout_seconds)
-        if benchmarking and config.edit_backend == "clipboard":
-            raise RuntimeError("編集ワーカー比較には直接編集の設定を使用してください")
         converter = FixedConverter(args.benchmark_source, args.benchmark_result) if benchmarking else Converter(config)
         if args.inspect:
             if sys.platform != "win32":
                 raise RuntimeError("入力欄の診断はWindows専用です")
-            if config.editor_worker == "native":
-                from .native import Desktop
-            else:
-                from .direct import Desktop
+            from .direct import Desktop
             print("3秒以内に診断する入力欄へフォーカスを移してください", flush=True)
             time.sleep(3)
             desktop = Desktop(config, debug=args.debug, timings=args.timings)
@@ -128,7 +117,7 @@ def _run(args, benchmarking):
         if sys.platform != "win32":
             raise RuntimeError("ショートカットでの変換はWindows専用です")
         if benchmarking:
-            print(f"AIなし比較: editor_worker={config.editor_worker} / 一致する対象だけを固定結果へ置換します", flush=True)
+            print("AIなし試験: 一致する対象だけを固定結果へ置換します", flush=True)
         elif config.backend == "llama_cpp":
             print("GGUFモデルを読み込んでいます…", flush=True)
             converter.load_model()
@@ -153,18 +142,8 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
     live_preview = None
-    if config.edit_backend == "clipboard":
-        from .windows import Desktop
-        desktop = Desktop(paste_wait_seconds=config.paste_wait_seconds,
-                          conversion_delimiters=config.conversion_delimiters,
-                          stop_at_kanji=config.stop_at_kanji,
-                          trailing_punctuation=config.trailing_punctuation)
-    else:
-        if config.editor_worker == "native":
-            from .native import Desktop
-        else:
-            from .direct import Desktop
-        desktop = Desktop(config, debug=debug, timings=timings)
+    from .direct import Desktop
+    desktop = Desktop(config, debug=debug, timings=timings)
     try:
         waiter = MessageWaiter()
         if any(binding.key == 0xF3 for binding in bindings.values()):
@@ -177,27 +156,23 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                     raise RuntimeError(f"ショートカット {binding.label} を登録できません。他アプリとの競合やOSの予約キーを確認してください")
                 registered.append(registration)
                 actions[registration] = ident
-        if config.edit_backend != "clipboard":
-            desktop.warmup()
+        desktop.warmup()
         if preview:
             from .preview import LivePreview
             live_preview = LivePreview(config, converter, pool)
             print("変換プレビュー: 有効（TSF対応入力欄／変換候補を随時更新）", flush=True)
         if config.auto_replace_on_ime_commit:
             from .auto_ime import AutoImeMonitor
-            if config.ime_commit_backend == 'tsf':
-                from .tsf_edit import TsfCommitEditor
-                tsf_editor = TsfCommitEditor(config.tsf_edit_path)
-                auto_monitor = AutoImeMonitor(config, waiter.wake, probe_factory=tsf_editor.probe_factory)
-            else:
-                auto_monitor = AutoImeMonitor(config, waiter.wake)
+            from .tsf_edit import TsfCommitEditor
+            tsf_editor = TsfCommitEditor(config.tsf_edit_path)
+            auto_monitor = AutoImeMonitor(config, waiter.wake, probe_factory=tsf_editor.probe_factory)
             auto_monitor.start()
         flush_logs()
         quit_label = f" / {bindings[3].label} = 終了" if 3 in bindings else ""
         print(f"起動: {bindings[1].label} = カーソル左の区切りまで / "
               f"{bindings[2].label} = 選択範囲{quit_label} / この端末でCtrl+C = 終了", flush=True)
         if auto_monitor is not None:
-            print(f"IME確定後の自動変換: 有効（置換={config.ime_commit_backend}／Enter確定／入力先に追従）", flush=True)
+            print("IME確定後の自動変換: 有効（TSF直接編集／Enter確定／入力先に追従）", flush=True)
         message = W.MSG()
         while True:
             while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
@@ -213,8 +188,6 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                     try:
                         started = time.perf_counter()
                         japanese_trigger = bindings[action].key == 0xF3
-                        if japanese_trigger and config.edit_backend == "clipboard":
-                            japanese_release.wait_released()
                         # NLS pseudo-key states can remain latched even after
                         # release. The parent checks physical release instead.
                         trigger_keys = () if japanese_trigger else bindings[action].keys
@@ -238,12 +211,10 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                     if live_preview is not None:
                         live_preview.paused.set()
                     try:
-                        from .auto_ime import capture_commit
                         started = time.perf_counter()
-                        prepared = tsf_editor.prepare(commit) if tsf_editor is not None else None
-                        captured = (tsf_editor.capture(prepared, config.context_chars,
-                                                       config.model_format not in {'jinen_v1', 'jinen_v2'})
-                                    if prepared is not None else capture_commit(desktop, auto_monitor, commit))
+                        prepared = tsf_editor.prepare(commit)
+                        captured = tsf_editor.capture(prepared, config.context_chars,
+                                                      config.model_format not in {'jinen_v1', 'jinen_v2'})
                         capture_seconds = time.perf_counter() - started
                         if not auto_monitor.valid(commit):
                             raise RuntimeError("取得中に入力・フォーカスが変わったため中止しました")

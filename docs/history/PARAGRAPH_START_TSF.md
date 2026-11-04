@@ -1,3 +1,5 @@
+> 過去の調査記録です。記載された方式・コマンドには廃止済みのものがあります。現行仕様は[README](../../README.md)と[アーキテクチャ](../ARCHITECTURE.md)を参照してください。
+
 # 改行後の先頭だけ自動変換できない問題の調査
 
 調査日: 2026-10-22。ブランチ: `codex/paragraph-start-tsf-investigation`。

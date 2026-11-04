@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def evaluate(cli, code):
@@ -23,7 +23,6 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Obsidian内部監視を確認して変換を起動")
     parser.add_argument("--config", default=str(ROOT / "config.toml"))
     parser.add_argument("--log-dir", type=Path, default=ROOT / "logs")
-    parser.add_argument("--tsf-edit", action="store_true", help="別DLLのTSF直接編集実験を起動")
     args, extra = parser.parse_known_args(argv)
     cli = shutil.which("Obsidian.com")
     if not cli:
@@ -33,12 +32,12 @@ def main(argv=None):
     dom_path = str(prefix) + "-dom.jsonl"
     uia_path = str(prefix) + "-uia.log"
     session_path = str(prefix) + "-session.json"
-    source = str(ROOT / "scripts" / "trace_obsidian_selection.js")
+    source = str(ROOT / "scripts" / "diagnostics" / "trace_obsidian_selection.js")
     code = ('(async()=>{if(window.__kanaSelectionTrace)await window.__kanaSelectionTrace.stop();'
             'window.__kanaSelectionTracePath=' + json.dumps(dom_path) + ';'
             'return JSON.stringify(eval(require("fs").readFileSync('
             + json.dumps(source) + ',"utf8")));})()')
-    session = {"dom": dom_path, "uia": uia_path, "mode": "tsf_edit" if args.tsf_edit else "uia"}
+    session = {"dom": dom_path, "uia": uia_path, "mode": "current"}
     try:
         start = evaluate(cli, code)
         session["start"] = start
@@ -51,10 +50,6 @@ def main(argv=None):
         try:
             module = 'kana_rewriter'
             run_args = list(extra)
-            if args.tsf_edit:
-                run_args = [{'--fixed-source': '--benchmark-source', '--fixed-result': '--benchmark-result'}.get(arg, arg)
-                            for arg in run_args]
-                run_args += ['--ime-commit-backend', 'tsf', '--auto-replace-on-ime-commit']
             return subprocess.call([sys.executable, "-m", module, "--config", args.config,
                                     *run_args, "--diagnostic-log", uia_path], cwd=ROOT)
         except KeyboardInterrupt:

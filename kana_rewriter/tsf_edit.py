@@ -229,7 +229,7 @@ class TsfCommitEditor:
         self.path = Path(path) if path else edit_probe_path()
         self.probe = None
 
-    def probe_factory(self, tid, ignored_monitor_path=None):
+    def probe_factory(self, tid, ignored_edit_path=None):
         self.probe = NativeEditProbe(tid, self.path)
         return self.probe
 

@@ -1,7 +1,6 @@
 """TSF observer transport and shared replacement policy (no command-line UI)."""
 import ctypes as C
 from ctypes import wintypes as W
-import json
 from pathlib import Path
 import sys
 
@@ -21,33 +20,24 @@ class Packet(C.Structure):
         (name, C.c_uint64) for name in ("tick", "hwnd", "generation", "composition_tick")] + [("text", C.c_wchar * 1024)]
 
 
-def probe_path():
-    directory = Path(__file__).resolve().parents[1] / "build/tsf-probe"
-    manifest = directory / "latest.json"
-    if manifest.is_file():
-        name = json.loads(manifest.read_text(encoding="utf-8-sig"))["dll"]
-        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".dll"):
-            raise RuntimeError("TSF監視DLLのビルド情報が不正です")
-        return directory / name
-    return directory / "kana-tsf-probe.dll"
 
 
 class NativeProbe:
     packet_type = Packet
     protocol_version = PROTOCOL_VERSION
-    def __init__(self, tid, dll=None):
+    def __init__(self, tid, dll):
         if sys.platform != "win32" or C.sizeof(C.c_void_p) != 8:
             raise RuntimeError("TSF監視は64ビットWindows/Python専用です")
-        path = Path(dll) if dll else probe_path()
+        path = Path(dll)
         if not path.is_file():
-            raise RuntimeError("TSF監視DLLがありません。scripts/build_tsf_probe.ps1を実行してください")
+            raise RuntimeError("TSF監視DLLがありません。scripts/build_preview.ps1を実行してください")
         self.dll = C.WinDLL(str(path.resolve()), use_last_error=True)
         version = getattr(self.dll, "ProbeProtocolVersion", None)
         if version is None:
-            raise RuntimeError("TSF監視DLLが古い形式です。scripts/build_tsf_probe.ps1で再ビルドしてください")
+            raise RuntimeError("TSF監視DLLが古い形式です。scripts/build_preview.ps1で再ビルドしてください")
         version.restype = W.DWORD
         if version() != self.protocol_version:
-            raise RuntimeError("TSF監視DLLの通知形式が非対応です。scripts/build_tsf_probe.ps1で再ビルドしてください")
+            raise RuntimeError("TSF監視DLLの通知形式が非対応です。scripts/build_preview.ps1で再ビルドしてください")
         self.dll.StartProbe.argtypes = [W.DWORD]
         self.dll.StartProbe.restype = W.BOOL
         self.dll.PollProbe.argtypes = [C.POINTER(self.packet_type)]
@@ -113,7 +103,3 @@ def eligible(event, now, target):
     if not event["text"] or not any(reading_spans(event["text"])):
         return False, "no_kana"
     return True, "eligible"
-
-
-def invalidates(events):
-    return any(event["kind"] in INPUT_EVENTS for event in events)

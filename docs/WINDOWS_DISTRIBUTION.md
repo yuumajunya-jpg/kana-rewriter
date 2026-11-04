@@ -1,6 +1,6 @@
 # kana-rewriter Windows配布版（ZIP）の使い方
 
-このZIPは、C++のビルド環境がないWindows PCで使うための配布版です。アプリ本体（Pythonソース）と、ビルド済みのTSF監視DLL・TSF編集DLLを同梱しています。Python本体と依存パッケージは含みません。
+このZIPは、C++のビルド環境がないWindows PCで使うための配布版です。アプリ本体（Pythonソース）と、ビルド済みのTSF編集DLL・プレビューDLLを同梱しています。Python本体と依存パッケージは含みません。
 
 モデル同梱版では、**zenz-v3.2-xsmall**と、その出典・ライセンスを記載した`MODEL_LICENSES.md`が入っています。`config.toml`も設定済みなので、**手順4を飛ばして手順5以降へ進んでください**。zenzの直接読み込みには`kv_overrides`に対応した`llama-cpp-python`が必要です（0.3.36で確認）。
 
@@ -17,8 +17,8 @@ kana-rewriter\
   MODEL_LICENSES.md         同梱モデルの出典とライセンス（モデル同梱版のみ）
   bundle-manifest.json      同梱ファイルのSHA256一覧
   kana_rewriter\            アプリ本体
-  build\tsf-probe\          監視用DLL
   build\tsf-edit-probe\     編集用DLL
+  build\tsf-preview\        プレビュー用DLL
   models\                   GGUFモデル（同梱版では設定済みのモデルが入っています）
 ```
 
@@ -161,17 +161,16 @@ start.cmd --text "はいしゃ" --left-context "歯が痛いので、"
 
 ## 4. IME確定後の自動変換を使う
 
-`Enter`でIME確定した直後に、確定した読みを自動で変換できます。`config.toml`を次の2行にします。
+`Enter`でIME確定した直後に、確定した読みを自動で変換できます。`config.toml`を次の設定を有効にします。
 
 ```toml
 auto_replace_on_ime_commit = true
-ime_commit_backend = "tsf"
 ```
 
 - 同梱のTSF編集DLLを使うため、追加のビルドは不要です。
-- `Ctrl+Enter`で確定した場合は置換しません（読みのまま確定します）。
+- 漢字・カタカナを含む確定文字列は全体を保持し、AIを呼びません。
+- `Ctrl+Enter`で確定した場合は自動変換しません。抑制操作として使う場合は、手動変換のキーを半角全角などへ変更してください。
 - 自動変換は、確定した範囲の原文・前後の文脈・選択・入力先を書き込み直前に確認します。変化していれば中止します。
-- `tsf_edit_path`や`tsf_monitor_path`を明示している場合は、同梱DLLのパスへ変更するか、その行をコメントアウトしてください。古いDLLを指していると動作しません。
 - アプリごとにIMEの通知が異なります。自動変換が働かないアプリでは、手動の`Ctrl+Enter`を使ってください。
 
 ## 5. うまく動かないとき
@@ -185,8 +184,8 @@ ime_commit_backend = "tsf"
 | zenzで`unknown pre-tokenizer type`が出る | `llama-cpp-python`が古い。手順3のコマンドで更新する |
 | 変換結果が崩れる | `model_format`がモデルと一致しているか確認する（手順5の表） |
 | `Ctrl+Enter`で何も起きない | カーソル位置、読みがひらがな・全角カタカナか、IMEや他アプリとキーが競合していないかを確認する |
-| 自動変換だけ働かない | 手順4の2行、`tsf_edit_path`の指定、対象アプリの対応を確認する。まず手動の`Ctrl+Enter`で変換できるか切り分ける |
-| `0x8007051a`で置換に失敗する | アプリを終了して起動し直す。TSF側が編集を拒否しているため、`ime_commit_backend`は`tsf`のまま、古いDLLを指定していないか確認する |
+| 自動変換だけ働かない | 自動変換の設定、`tsf_edit_path`の指定、対象アプリの対応を確認する。まず手動の`Ctrl+Enter`で変換できるか切り分ける |
+| `0x8007051a`で置換に失敗する | アプリを終了して起動し直す。TSF側が編集を拒否しているため、古いDLLを指定していないか確認する |
 
 ログは、`--diagnostic-log`を付けて起動すると`logs`フォルダーへ保存されます。
 
@@ -203,7 +202,6 @@ ime_commit_backend = "tsf"
 この操作だけはC++ビルド環境と、ローカル推論が動く64ビットCPython環境が必要です。
 
 ```powershell
-.\scripts\build_tsf_probe.ps1
 .\scripts\build_tsf_edit_probe.ps1
 .\scripts\build_preview.ps1
 .\.venv\Scripts\python.exe scripts/package_windows.py
@@ -214,7 +212,7 @@ ime_commit_backend = "tsf"
 モデルなしが既定です。再配布条件を確認したモデルを同梱する場合:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/package_windows.py --model models/jinen-v2-xsmall-Q5_K_M.gguf
+.\.venv\Scripts\python.exe scripts/package_windows.py --model models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf --model-format zenz_v3_2 --model-name zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf
 ```
 
 `jinen-v2-`で始まるモデル名は`model_format = "jinen_v2"`に設定します。それ以外のモデルは手動で確認してください。既存の個人用`config.toml`、ログ、APIキー、`.venv`はコピーしません。

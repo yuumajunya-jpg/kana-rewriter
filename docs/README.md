@@ -1,28 +1,15 @@
 # 資料一覧
 
-## 現在の利用・開発手順
-
 | 資料 | 内容 |
 |---|---|
-| [アーキテクチャ](ARCHITECTURE.md) | 監視・変換・プレビューの責務、寿命、検証 |
-| [README](../README.md) | 導入・起動・基本操作・診断 |
-| [設定例](../config.example.toml) | 全設定項目 |
-| [Windows配布版](WINDOWS_DISTRIBUTION.md) | 既存Pythonで使うアプリ・TSF DLLのZIPの作成と利用 |
-| [編集処理の詳細](EDITOR_DETAILS.md) | 変換範囲・IME・中止条件・UIAの制約 |
-| [IME相互作用テスト](IME_TEST_DESIGN.md) | IME一時オフ・選択・送信・復元の回帰試験と不変条件 |
-| [Obsidianの箇条書き選択](OBSIDIAN_LIST_SELECTION.md) | UIA選択方式への復元、以前の変更・試験の経緯と制限 |
-| [ObsidianのIME確定後の根本原因](OBSIDIAN_IME_ROOT_CAUSE.md) | DOM・CodeMirror・UIAログから特定した選択解除の実行順競合 |
-| [TSF直接編集の検証と統合](TSF_DIRECT_EDIT_TRIAL.md) | 確定範囲の直接置換、合成アプリ・実機での検証と通常起動への統合 |
-| [改行後の先頭のTSF調査](PARAGRAPH_START_TSF.md) | 同じ選択の再通知による誤中止の再現・修正、入力欄識別の残る候補 |
-| [モデル資料](../MODELS.md) | 調査時点の候補・固定GGUF・入力形式 |
-| [変換後の修正モデル](POST_CONVERSION_MODELS.md) | タイポ・誤変換・文法の専用モデル／検出器／小型LLM、導入・評価案（2026-10-13、実推論未検証） |
-
-## 実験・過去の調査記録
-
-以下は設計判断と計測履歴です。「未実装」「未検証」やブランチ名は各調査時点の状態を示す場合があります。現在の挙動はREADMEとアーキテクチャを参照してください。
-
-| 資料 | 内容 |
-|---|---|
-| [C++編集ワーカー](../NATIVE_EDITOR.md) | 任意バックエンドの構築・比較・実験履歴。言語移行はいったん終了 |
-
-モデルの容量・公開状況・ランタイム制約などは調査時点の情報です。手動試行と非表示入力欄の自動ベンチマークは測定対象が異なります。
+| [README](../README.md) | 導入・起動・操作・診断 |
+| [設定例](../config.example.toml) | 現行の設定項目 |
+| [アーキテクチャ](ARCHITECTURE.md) | 手動編集・TSF自動変換・プレビューの責務と寿命 |
+| [編集処理の詳細](EDITOR_DETAILS.md) | 手動変換の範囲、IME制御、UIAの制約 |
+| [TSF範囲検証](TSF_RANGE_VALIDATION.md) | 保持範囲・文脈・選択による適用前の検証 |
+| [IMEテスト設計](IME_TEST_DESIGN.md) | IME制御と手動編集の回帰試験 |
+| [Windows配布版](WINDOWS_DISTRIBUTION.md) | DLL・モデルを含むZIPの作成と利用 |
+| [モデル資料](../MODELS.md) | モデル取得・入力形式・HTTP接続 |
+| [モデルライセンス](MODEL_LICENSES.md) | モデル配布時の条件 |
+| [開発用診断ツール](../scripts/diagnostics/README.md) | Obsidianの観測と再現 |
+| [過去の調査](history/README.md) | 廃止方式、原因調査、実機検証の記録 |

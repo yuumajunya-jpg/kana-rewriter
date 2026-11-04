@@ -3,7 +3,7 @@
 ## 実行経路
 
 1. `notifications.NotificationPump` がTSF DLLの通知を専用スレッドで回収する。UIAの同期呼び出しやログ出力を実行しない。
-2. `auto_ime.FocusReader` が現在の入力欄の編集可否とウィンドウを検証する。UIA編集ではTextPattern提供要素のRuntimeIdも照合する。TSF直接編集ではUIAの要素自体が確定時に再生成されるため、RuntimeIdを文書識別に使わず、TSFのcontext通知・文脈世代と保持した確定範囲を使う。
+2. `auto_ime.FocusReader` が現在の入力欄の編集可否とウィンドウを検証する。TSF直接編集ではUIAの要素自体が確定時に再生成されるため、RuntimeIdを文書識別に使わず、TSFのcontext通知・文脈世代と保持した確定範囲を使う。
 3. `commit_state.CommitState` が受付開始時刻、入力リビジョン、保留確定、推論中の状態を管理する。
 4. 通常起動のメッセージループが取得・推論・適用を実行する。TSF編集は `tsf_edit.TsfCommitEditor` が確定範囲と原文・文脈を検証する。手動変換には設定済みの編集方式を使う。
 5. `preview_state` はIMEセッションと候補の順序だけを管理し、`preview` はTSF取得・推論IPC・子プロセス終了を管理する。`preview_window` は非アクティブな最前面表示、読みと結果の2行描画、対象画面の作業領域内への配置を担当する。
@@ -24,7 +24,7 @@
 
 ## ビルドと検証
 
-`scripts/build_tsf_probe.ps1`、`scripts/build_tsf_edit_probe.ps1`、`scripts/build_preview.ps1` でDLLを作成する。配布には三つとも必要。マニフェストのソースハッシュで古いDLLの混入を拒否する。
+`scripts/build_tsf_edit_probe.ps1`と`scripts/build_preview.ps1`で編集・プレビューの2種類のDLLを作成する。マニフェストのソースハッシュで古いDLLの混入を拒否する。
 
 ```powershell
 .venv/Scripts/python.exe -m unittest discover -s tests -v
@@ -32,6 +32,15 @@
 
 通知回収の順序・欠落・例外、遅いUIA取得、文書切り替え、推論中の入力、実TSF確定範囲、プレビューIPCと実HWNDの表示を回帰試験で確認する。合成編集アプリの試験と実アプリのIME操作は異なるため、Obsidian等の実入力による互換性確認は別途必要。
 
-## 整理方針
+## 現行方式
 
-通常起動へ統合済みの `tsf_edit_trial` と単発の性能比較スクリプト・古い計測資料を削除した。固定結果での再現は通常起動の `--benchmark-source` と `--benchmark-result` を使う。実編集・通知の回帰試験と、利用・配布・モデルライセンスの資料は維持する。
+- 手動変換: Pythonの編集ワーカー。標準Edit/RichEditはWin32、それ以外はUIA。
+- Enter確定後の自動変換: TSF確定範囲への直接編集。漢字・カタカナを含む確定文字列は全体をAIへ渡さない。
+- プレビュー: TSF読み取り専用DLL、Pythonの状態管理・推論、Win32小窓。横位置は最初の有効座標に固定し、縦位置は追従する。角丸を使わない。
+- モデル: 既定はzenz-v3.2-xsmall。jinen v1/v2、chat、ローカルHTTP接続も維持する。
+
+C++編集ワーカー、クリップボード編集、UIA自動変換、単独TSF試験CLIは廃止した。
+`native/tsf_probe.cpp`と`tsf.NativeProbe`は現行プレビューの共通基盤として残す。
+`native/tsf_probe_fixture.cpp`はTSF回帰試験用の合成アプリで、配布物には含めない。
+固定結果による試験は通常起動の`--benchmark-source` / `--benchmark-result`を使う。
+過去の判断と実機記録は[history](history/README.md)にまとめる。

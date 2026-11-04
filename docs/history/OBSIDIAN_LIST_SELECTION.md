@@ -1,3 +1,5 @@
+> 過去の調査記録です。記載された方式・コマンドには廃止済みのものがあります。現行仕様は[README](../../README.md)と[アーキテクチャ](../ARCHITECTURE.md)を参照してください。
+
 # Obsidianの箇条書きでIME確定後の置換が中止される問題
 
 ## 原因を特定（2026-10-22）
@@ -24,13 +26,13 @@ python scripts/diagnose_obsidian.py
 本文・選択の処理や待機時間は変更しない。
 
 PythonのUIAログだけでは、実DOMに選択が届かない場合と、届いた後に解除される場合を区別できない。
-`scripts/trace_obsidian_selection.js`をObsidian公式CLIの`eval`で読み込む。
+`scripts/diagnostics/trace_obsidian_selection.js`をObsidian公式CLIの`eval`で読み込む。
 本文・選択・フォーカスを変更する処理は呼ばない。イベント観測と既存関数を転送するラッパーだけを置く。
 ラッパーは元のthis、引数、戻り値、例外を維持し、stopで元のプロパティ定義を復元する。
 プラグイン等が後から同じ関数を変更していた場合は、その変更を上書きしない。
 
 ```powershell
-obsidian eval 'code=eval(require("fs").readFileSync("C:/workfile/kana-rewriter/scripts/trace_obsidian_selection.js","utf8"))'
+obsidian eval 'code=eval(require("fs").readFileSync("C:/workfile/kana-rewriter/scripts/diagnostics/trace_obsidian_selection.js","utf8"))'
 ```
 
 ログは `logs/obsidian-selection.jsonl`。DOM選択の両端・ノード識別子、CodeMirror選択、
@@ -217,13 +219,13 @@ python -m unittest tests.test_direct.UiaRangeTests tests.test_direct.ImeInteract
 
 ## 実Obsidianの反復試験
 
-`scripts/stress_obsidian_uia.py`は専用保管庫の`repro.md`を上書きして検証する。
+`scripts/diagnostics/stress_obsidian_uia.py`は専用保管庫の`repro.md`を上書きして検証する。
 別プロファイルのObsidianを`--user-data-dir=<検証プロファイル>`、
 `--remote-debugging-port=19273`、`--force-renderer-accessibility`で起動する。
 `--test-vault`と接続先保管庫の絶対パスが一致しなければ本文を変更しない。
 
 ```powershell
-python scripts/stress_obsidian_uia.py --test-vault C:\path\to\disposable-vault --samples 1000 --composition --backend-replace --view source
+python scripts/diagnostics/stress_obsidian_uia.py --test-vault C:\path\to\disposable-vault --samples 1000 --composition --backend-replace --view source
 ```
 
 追加依存は`websocket-client`と通常のdesktop依存。

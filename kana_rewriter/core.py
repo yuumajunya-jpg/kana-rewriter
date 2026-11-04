@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Config:
     backend: str = "llama_cpp"
-    model_path: str = "models/jinen-v1-xsmall-Q5_K_M.gguf"
-    model_format: str = "jinen_v1"
+    model_path: str = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
+    model_format: str = "zenz_v3_2"
     context_chars: int = 64
     n_ctx: int = 0
     n_gpu_layers: int = 0
@@ -26,7 +26,6 @@ class Config:
     timeout_seconds: float = 30
     max_chars: int = 1000
     max_tokens: int = 256
-    paste_wait_seconds: float = 0.1
     api_key_env: str = "KANA_REWRITER_API_KEY"
     conversion_delimiters: str = "。"
     stop_at_kanji: bool = True
@@ -36,46 +35,27 @@ class Config:
     hotkey_quit: str = ""
     auto_replace_on_ime_commit: bool = False
     preview_enabled: bool = True
-    tsf_monitor_path: str = ""
-    ime_commit_backend: str = "uia"
     tsf_edit_path: str = ""
     edit_backend: str = "auto"
     uia_ime_check: str = "auto"
     editor_timeout_seconds: float = 5
     max_document_chars: int = 200000
     uia_readback_initial_delay_ms: int = 0
-    editor_worker: str = "python"
-    native_worker_path: str = str(Path(__file__).resolve().parents[1] / "build" / "native" / "kana-editor-worker.exe")
-    native_uia_wait: str = "poll"
 
     def __post_init__(self):
         if type(self.preview_enabled) is not bool:
             raise ValueError("preview_enabledは真偽値です")
         if type(self.auto_replace_on_ime_commit) is not bool:
             raise ValueError("auto_replace_on_ime_commitは真偽値です")
-        if not isinstance(self.tsf_monitor_path, str):
-            raise ValueError("tsf_monitor_pathはDLLのパスまたは空文字列です")
-        if not isinstance(self.ime_commit_backend, str) or self.ime_commit_backend not in {'uia', 'tsf'}:
-            raise ValueError('ime_commit_backendはuiaまたはtsfです')
         if not isinstance(self.tsf_edit_path, str):
             raise ValueError('tsf_edit_pathはDLLのパスまたは空文字列です')
-        if self.auto_replace_on_ime_commit and (self.editor_worker != "python" or self.edit_backend == "clipboard"):
-            raise ValueError("TSF自動変換はPythonの直接編集方式を使用してください")
-        if self.editor_worker not in {"python", "native"}:
-            raise ValueError("editor_workerはpythonまたはnativeです")
-        if self.native_uia_wait not in {"poll", "event"}:
-            raise ValueError("native_uia_waitはpollまたはeventです")
-        if not isinstance(self.native_worker_path, str) or not self.native_worker_path:
-            raise ValueError("native_worker_pathは実行ファイルのパスです")
-        if self.editor_worker == "native" and self.edit_backend == "clipboard":
-            raise ValueError("C++編集ワーカーではclipboardを使用できません")
         if (type(self.uia_readback_initial_delay_ms) is not int
                 or not 0 <= self.uia_readback_initial_delay_ms <= 100):
             raise ValueError("uia_readback_initial_delay_msは0〜100の整数です")
         if self.uia_ime_check not in {"auto", "strict", "off"}:
             raise ValueError("uia_ime_checkはauto・strict・offです")
-        if self.edit_backend not in {"auto", "win32", "uia", "clipboard"}:
-            raise ValueError("edit_backendはauto・win32・uia・clipboardです")
+        if self.edit_backend not in {"auto", "win32", "uia"}:
+            raise ValueError("edit_backendはauto・win32・uiaです")
         if not 1 <= self.editor_timeout_seconds <= 30 or not 1000 <= self.max_document_chars <= 1000000:
             raise ValueError("editor_timeout_secondsは1〜30秒、max_document_charsは1000〜1000000です")
         if not isinstance(self.hotkey_quit, str):
@@ -105,24 +85,22 @@ class Config:
             raise ValueError("model、timeout_secondsの設定が不正です")
         if not 1 <= self.max_chars <= 10000 or not 1 <= self.max_tokens <= 32768:
             raise ValueError("max_chars、max_tokensの設定が不正です")
-        if not 0.1 <= self.paste_wait_seconds <= 5:
-            raise ValueError("paste_wait_secondsは0.1〜5秒です")
 
     @classmethod
     def load(cls, path: str):
         file = Path(path).resolve()
         values = tomllib.loads(file.read_text(encoding="utf-8-sig"))
+        # Accept redundant settings from earlier Python/TSF configurations.
+        # Reject removed editing methods instead of silently changing behavior.
+        for key, supported in {"editor_worker": "python", "ime_commit_backend": "tsf",
+                               "native_uia_wait": "poll"}.items():
+            if key in values and values.pop(key) != supported:
+                raise ValueError(f"{key}の旧方式は廃止しました。手動編集はPython、自動変換はTSFを使用します")
+        for key in ("native_worker_path", "tsf_monitor_path", "paste_wait_seconds"):
+            values.pop(key, None)
         model_path = Path(values.get("model_path", cls.model_path))
         if not model_path.is_absolute():
             values["model_path"] = str(file.parent / model_path)
-        if "native_worker_path" in values:
-            worker_path = Path(values["native_worker_path"])
-            if not worker_path.is_absolute():
-                values["native_worker_path"] = str(file.parent / worker_path)
-        if values.get("tsf_monitor_path"):
-            monitor_path = Path(values["tsf_monitor_path"])
-            if not monitor_path.is_absolute():
-                values["tsf_monitor_path"] = str(file.parent / monitor_path)
         if values.get('tsf_edit_path'):
             edit_path = Path(values['tsf_edit_path'])
             if not edit_path.is_absolute():
@@ -304,20 +282,6 @@ def apply_result(backend, capture: Capture, result: str) -> bool:
     """Revalidate before touching the editor. Backend owns platform mechanics."""
     if result == capture.source:
         return False
-    if capture.edit_token is not None:
-        return backend.apply(capture, result)
-    if backend.stamp() != capture.stamp:
-        raise RuntimeError("待機中に操作またはフォーカス変更があったため中止しました")
-    if backend.copy_selection() != capture.text:
-        raise RuntimeError("選択範囲の内容が変わったため中止しました")
-    # copy_selection checks focus while copying; replacement checks it again.
-    replacement = capture.region.rebuild(result) if capture.region is not None else result
-    logger.debug("差し替え前=%r / 完成した差し替え文字列=%r", capture.text, replacement)
-    if capture.region is not None:
-        region = capture.region
-        original_caret = capture.caret if capture.caret is not None else len(region.left + region.target)
-        caret = original_caret + len(result) - len(region.target)
-        backend.replace(replacement, capture.stamp[0], caret=caret)
-    else:
-        backend.replace(replacement, capture.stamp[0])
-    return True
+    if capture.edit_token is None:
+        raise RuntimeError("入力欄の編集トークンがありません。再取得してください")
+    return backend.apply(capture, result)

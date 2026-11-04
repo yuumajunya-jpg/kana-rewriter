@@ -1,270 +1,115 @@
 # kana-rewriter
 
-Windowsの入力欄で、確定済みのひらがな・全角カタカナをローカルAIで漢字かな交じり文に置き換えるツールです。左文脈を利用し、対象以外の本文や句読点を保持します。
-
-### 入力中の変換プレビュー（試作）
-
-この試作ブランチでは通常起動でも有効です。`--no-preview` または `preview_enabled = false` で無効化できます。
-起動例: `python -m kana_rewriter --config config.toml`。
-IME未確定入力中だけ、上段に読み、下段に変換結果を表示します。待機表示、ラベル、変換中表示は出しません。読みと結果が同じときは1行で表示します。
-入力の変化を検出したらデバウンスなしで推論を要求し、次の候補を計算中は直前の候補を維持します。
-最初の候補が届くまでは非表示です。確定・キャンセル・入力先変更時は消えます。
-表示だけでは本文は変わりません。通常の変換ショートカットで変換してください。
-
-初回は `.\scripts\build_preview.ps1` を実行してください（既存のLLVM/MinGWビルド環境が必要です）。
-未確定文字と入力位置は専用の読み取り専用TSF監視DLLから取得します。
-位置にはTSFの `ITfContextView::GetTextExt` を使用し、アプリ名ごとの処理分岐は設けていません。
-最初の有効な座標が取得できるまでは表示せず、レイアウト通知で再取得します。
-画面左上や入力欄全体の座標への代替表示は行いません。
-対象はTSFで未確定文字と位置を公開する64ビットアプリです。全アプリでの動作を保証するものではありません。
-文字列と前後の文脈はTSFの同一読み取りセッションから取得します。UIA本文取得への切り替えは行いません。
-一時的な座標取得失敗では同じ入力セッションの直前の位置と候補を維持し、確定・キャンセル・入力先変更で消します。
-未確定範囲内の変換対象外の文字や末尾の句読点も、変換結果の行に保持します。
-Win32の小窓を使い、モニターごとのDPIに合わせたClearTypeで文字を描画します。背景は不透明のまま、角丸・境界線・影で本文から分離します。
-通常変換とモデルを共有するため、実行中のプレビュー推論が終わるまで変換が待つ場合があります。
-UI起動失敗などの診断は端末へ出力します。
-
-例: `歯が痛いので、はいしゃ│に行く` → `歯が痛いので、歯医者│に行く`（│はカーソル）。
-プレビューの上段には変換対象の読み（`はいしゃ`）、下段には保持した前後の文字を含む変換結果（`歯医者`）を表示します。
-
-通常はPython単体で動作します。標準Edit/RichEditはWin32 API、それ以外はUI Automation（UIA）で取得・選択し、Unicode入力で部分置換します。既定の直接編集方式ではクリップボードを使いません。AIは`llama-cpp-python`からGGUFを直接読み込みます。
-
-C++編集ワーカーは比較用の実験実装として残しています。Python版の最適化後、手動試行ではC++版との明確な速度差が確認できなかったため、通常利用はPython版としています。
+Windowsの入力欄で、日本語のかなをローカルAIで漢字かな交じり文へ変換するツールです。
+手動ショートカット、EnterによるIME確定後の自動変換、入力中の変換プレビューに対応します。
+標準モデルは **zenz-v3.2-xsmall / Q5_K_M** です。左右の文脈を使い、対象以外の本文や句読点を保持します。
 
 ## セットアップ
 
-ビルド環境のないWindows PCには、アプリとビルド済みTSF監視DLL・TSF編集DLLを同梱したZIPを配布できます。展開後に`start.cmd`で起動する構成で、ZIP内の`README.md`に導入手順を記載しています。[配布版の作成・利用手順](docs/WINDOWS_DISTRIBUTION.md)を参照してください。以下はソースからセットアップする場合の手順です。
+Windows 10/11、64ビットPython 3.11以上が必要です。
+ビルド環境のないPCでは、[Windows配布版の手順](docs/WINDOWS_DISTRIBUTION.md)を参照してください。
 
-Windows 10/11、Python 3.11以上が必要です。以下はリポジトリのルートで実行するcmd用の手順です。
+ソースから使う場合は、リポジトリのルートで次を実行します。
 
 ```cmd
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[local,desktop]" huggingface_hub
 copy config.example.toml config.toml
-```
-
-既存の設定ファイルは上書きせず、そのまま利用してください。`llama-cpp-python`の構築にはVisual StudioのC++ツールが必要になる場合があります。[公式インストール手順](https://github.com/abetlen/llama-cpp-python#installation)を参照してください。
-
-現在の利用・速度計測に使っているモデルは**jinen-v2-xsmall / Q5_K_M（約28.3MB）**です。以下の固定リビジョンから、利用者環境と同じGGUFを取得できます。
-
-```cmd
-.\.venv\Scripts\hf.exe download togatogah/jinen-v2-xsmall.gguf jinen-v2-xsmall-Q5_K_M.gguf --revision b91eac974998a37423ca8a1198fd7c5631b06e57 --local-dir models
-certutil -hashfile models\jinen-v2-xsmall-Q5_K_M.gguf SHA256
-```
-
-確認済みSHA256: `24ff3af5db712fbbb4aa9254ee28ec4d731207134471ab68b06c1828726284c2`。[配布元の固定コミット](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/commit/b91eac974998a37423ca8a1198fd7c5631b06e57)とローカルファイルのハッシュが一致しています。`config.toml`は次の組み合わせで設定してください。更新前の設定がある場合はこの2項目を変更します。
-
-```toml
-model_path = "models/jinen-v2-xsmall-Q5_K_M.gguf"
-model_format = "jinen_v2"
-```
-
-v2の入力はプロンプト全体をNFKC正規化します。`model_format`も必ずv2に合わせてください。モデルの比較・入力形式は[MODELS.md](MODELS.md)を参照してください。モデルファイルはこのリポジトリに含めません。
-
-### jinen-v2-smallを使う場合
-
-small版のQ5_K_M（約81.1MB）も同じPython環境で利用できます。[配布元](https://huggingface.co/togatogah/jinen-v2-small.gguf)から次のコマンドで取得します。
-
-```cmd
-.\.venv\Scripts\hf.exe download togatogah/jinen-v2-small.gguf jinen-v2-small-Q5_K_M.gguf --revision 3461d0573ab447985badde3174165b967d06076c --local-dir models
-certutil -hashfile models\jinen-v2-small-Q5_K_M.gguf SHA256
-```
-
-ローカルに取得済みのファイルで確認したSHA256: `80482707513d6b67dafc31774371cf95d765542abf8d74eebf5f32f92d788bd3`。`config.toml`を次の組み合わせに変更して再起動します。
-
-```toml
-model_path = "models/jinen-v2-small-Q5_K_M.gguf"
-model_format = "jinen_v2"
-```
-
-xsmallとsmallで入力形式は同じです。これまでの速度計測はxsmallで行っているため、smallの速度・精度は同じ結果とは限りません。
-
-### zenz-v3.2-xsmallを使う場合
-
-jinen-v2-xsmallの変換結果が合わない場合の代替として、左右の文脈を使う**zenz-v3.2-xsmall / Q5_K_M（20,970,304 bytes、約21.0MB）**を利用できます。入力形式は`model_format = "zenz_v3_2"`で対応済みです。
-
-zenzのGGUFは`tokenizer.ggml.pre = gpt2-small-japanese-char`というazooKeyのllama.cppフォーク固有の名前を持ち、上流llama.cppはこの名前を知らないためそのままでは読み込めません。フォークはこの名前をGPT-2と同じpre-tokenizerに割り当てています。そこで`model_format = "zenz_v3_2"`のとき、アプリが読み込み時だけ`tokenizer.ggml.pre`を`gpt-2`へ上書きします。トークン化は変わらず、GGUFファイルも変更しません。この上書きはllama.cppの`--override-kv`と同じ仕組みで、`llama-cpp-python 0.3.36`で動作を確認しています。
-
-モデルを取得し、ハッシュを確認します。
-
-```cmd
 .\.venv\Scripts\hf.exe download Miwa-Keita/zenz-v3.2-xsmall-gguf ggml-model-Q5_K_M.gguf --revision 4f5423f0fad41a73b1242eb96fe5c12ae4fdca83 --local-dir models/zenz-v3.2-xsmall
-certutil -hashfile models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf SHA256
 ```
 
-確認済みSHA256: `00c64b3d318045a708d0cad5434faccab10f5481a49e6362864551fd0995fa58`。[配布元](https://huggingface.co/Miwa-Keita/zenz-v3.2-xsmall-gguf)の固定コミット`4f5423f0fad41a73b1242eb96fe5c12ae4fdca83`のファイルと一致しています。
+既存の`config.toml`は上書きせず、そのまま利用してください。
+モデルのSHA256、jinenへの切り替え、HTTP接続は[モデル資料](MODELS.md)を参照してください。
+zenzは読み込み時にトークナイザーの設定名を上書きします。GGUFファイルは変更しません。
+`llama-cpp-python 0.3.36`で動作確認済みです。構築にC++開発環境が必要になる場合があります。
 
-`config.toml`を次の組み合わせに変更します。サーバーもGGUFの変換も不要で、起動方法はこれまでと同じです。
-
-```toml
-backend = "llama_cpp"
-model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
-model_format = "zenz_v3_2"
-```
-
-変換の確認:
-
-```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --text "はいしゃ" --left-context "歯が痛いので、"
-```
-
-`歯医者`が返れば読み込めています。通常の起動もこれまでどおりです。
-
-```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --editor-worker python
-```
-
-`llama-cpp-python 0.3.36`で直接読込を確認しています。`kv_overrides`に対応していない古い版では読み込めないため、`llama-cpp-python`を更新するか、次のサーバー経由を使用してください。
-
-#### 公式GGUFのままサーバー経由で使う場合
-
-azooKeyのllama.cppフォークはこのpre-tokenizer名を標準で認識するため、`llama-server`として起動して`backend = "http"`で接続することもできます。ビルドは不要で、[フォークのリリース](https://github.com/azooKey/llama.cpp/releases/tag/b4846)のビルド済みWindowsバイナリを使用します。
-
-`llama-b4846-bin-win-avx2-x64.zip`（AVX2対応CPU向け。古いCPUでは`avx`または`noavx`）を展開し、アプリを起動する前に別のPowerShellウィンドウでサーバーを起動します。`server is listening`とモデル読込の完了を確認し、そのまま開いておきます。
+プレビューと自動変換に使うDLLをPowerShellでビルドします。
+既存のLLVM/MinGW環境、またはVisual StudioのC++開発環境とCMakeが必要です。
 
 ```powershell
-.\llama-b4846-bin-win-avx2-x64\llama-server.exe -m models\zenz-v3.2-xsmall\ggml-model-Q5_K_M.gguf --host 127.0.0.1 --port 8080 -c 1024
+.\scripts\build_tsf_edit_probe.ps1
+.\scripts\build_preview.ps1
 ```
 
-このバイナリ（b4846）で公式GGUFをそのまま読み込み、「歯医者」への変換を確認しています。
+## 起動と操作
 
-`config.toml`は次の4項目に変更します。`model_format`は必ず`zenz_v3_2`にしてください。
-
-```toml
-backend = "http"
-endpoint = "http://127.0.0.1:8080/v1/completions"
-model = "local"
-model_format = "zenz_v3_2"
-```
-
-`backend = "http"`では`model_path`、`n_ctx`、`n_gpu_layers`は使われません。コンテキスト長はサーバーの`-c`、GPUを使う場合はリリースのCUDA対応zipを使用し、`-ngl`で層数を指定します。サーバーは`127.0.0.1`だけに待ち受け、外部へ公開しないでください。
-
-サーバーを停止した状態で変換すると接続エラーになります。アプリより先にサーバーを起動し、終了時はサーバー側でCtrl+Cを押します。`llama-cpp-python`はこの経路では使いませんが、セットアップ手順で導入済みでも動作に影響しません。
-
-## 動作確認と起動
-
-入力欄を操作せずに変換を確認します。以下は文脈による変換を確認するための入力例です。出力はモデル・設定により変わります。
+モデルだけの動作確認と、通常起動:
 
 ```cmd
 .\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --text "はいしゃ" --left-context "歯が痛いので、"
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --text "はいしゃ" --left-context "車が壊れたので、"
+.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml
 ```
 
-通常の起動:
-
-```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --editor-worker python
-```
-
-「起動」と表示されたら、入力欄にフォーカスを置き、IME入力を確定してからショートカットを押します。
-
-| 操作 | `config.example.toml`のキー |
+| 操作 | 設定例のキー |
 |---|---|
 | カーソル左の区切りまで変換 | Ctrl+Enter |
 | 選択範囲内のかなを変換 | Ctrl+Shift+Enter |
 | 終了 | 起動端末でCtrl+C |
 
-例: `さんぽ。│`にCtrl+Enter → `散歩。│`。句読点は保持し、文字数の変化を考慮してカーソルを戻します。
+例: `さんぽ。│`にCtrl+Enter → `散歩。│`（│はカーソル）。
+カーソル左の走査は、既定では漢字・カタカナ・「。」で止まります。
+手動変換は標準Edit/RichEditをWin32 API、それ以外をUI Automation（UIA）で取得・部分置換します。
+クリップボードは使いません。
+
+日本語キーボードでは`hotkey_line = "半角全角"`、`hotkey_selection = "Shift+半角全角"`も指定できます。
+半角全角キーはRaw Inputで実際の解放を確認してから適用します。
+キーの競合は起動時にエラーになります。
 
 ### IME確定後の自動変換
 
-`config.toml`に次を追加すると、通常起動でEnterを伴うIME確定後に、確定した範囲だけを自動変換できます。既定は無効です。手動ショートカットも併用できます。
+`config.toml`で`auto_replace_on_ime_commit = true`にすると、Enterで確定した範囲だけをTSFで直接置換します。
+既定は無効です。`--auto-replace-on-ime-commit` / `--no-auto-replace-on-ime-commit`で起動時だけ切り替えられます。
 
-```toml
-auto_replace_on_ime_commit = true
-ime_commit_backend = "tsf"
-```
+- 今回の確定文字列に漢字またはカタカナ（半角を含む）が1文字でもあれば、全体を変換済みとしてAIへ渡しません。`コーヒーをのむ`や`今日はいいてんき`はそのまま保持します。
+- `こーひー`の長音、ひらがなの分離した濁点・半濁点は変換対象です。周囲の本文は除外判定に含めません。
+- Ctrl+Enterによる確定では自動変換しません。この操作で変換を抑制する場合は、手動変換のキーを半角全角などへ変更してください。
+- 推論中の入力・文書切り替えで中止します。失敗時の方式切り替えや文字の再送は行いません。
 
-起動時だけ有効にする場合:
+部分確定・マウス確定は動作保証の対象外です。書き込み結果が不明な場合は停止します。本文を確認して再起動してください。
+
+### 入力中のプレビュー
+
+通常起動で有効です。`--no-preview`または`preview_enabled = false`で無効化できます。
+IME未確定入力の読みと変換結果を、角丸のない小窓に表示します。同じ結果なら1行になります。
+最初の有効な入力位置を横方向の基準とし、縦方向の移動に追従します。画面端では作業領域内へ調整します。
+候補更新中は直前の候補を維持し、確定・取消・入力先変更で非表示にします。
+表示だけでは本文は変わりません。
+
+TSFで未確定文字・位置を公開する64ビットアプリが対象です。
+位置と前後の文脈をTSFの同じ読み取りセッションから取得します。
+通常変換とモデルを共有するため、実行中の推論が終わるまで次の変換が待つ場合があります。
+
+## 設定と診断
+
+全項目は[設定例](config.example.toml)を参照してください。
+`--config`を省略すると設定ファイルを自動読込せず、プログラムの既定値を使います。
+その場合の手動キーはCtrl+Alt+K / Ctrl+Alt+Jです。
+zenzの左右文脈はそれぞれ`context_chars`文字まで（既定64）、jinenは左文脈だけを使います。
+
+旧設定の`editor_worker = "python"`と`ime_commit_backend = "tsf"`は読み込み時に受け入れますが、指定は不要です。
+C++編集、クリップボード編集、UIA自動変換は廃止しました。旧方式を明示した設定はエラーになります。
 
 ```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --auto-replace-on-ime-commit --ime-commit-backend tsf
+python -m kana_rewriter --config config.toml --inspect
+python -m kana_rewriter --config config.toml --debug
+python -m kana_rewriter --config config.toml --timings
+python -m kana_rewriter --config config.toml --diagnostic-log
 ```
 
-設定が有効でも、`--no-auto-replace-on-ime-commit`でその起動だけ無効にできます。モデル読込後に表示される「IME確定後の自動変換: 有効」が起動時の状態です。
+`--inspect`は3秒後に入力欄の能力を確認します。本文を変更しません。
+`--debug`と`--diagnostic-log`は対象の文章を含む診断を出力します。
+AIなしの編集確認には`--benchmark-source "さんぽ" --benchmark-result "散歩"`を使えます。
 
-64ビットWindows/PythonとTSF編集DLLが必要です。配布ZIPではDLLを同梱し、利用先のPython環境を使います。ソースから使う場合、初回はPowerShellで次を実行します。このワークスペースのllvm-mingw、またはVisual StudioのC++開発環境とCMakeを使います。自動変換を無効にしている場合、DLLは不要です。
+## 開発・対応範囲
 
 ```powershell
-.\scripts\build_tsf_edit_probe.ps1
+python -m unittest discover -s tests -v
+node --test tests/test_obsidian_trace.cjs
 ```
 
-`ime_commit_backend = "tsf"`では、確定時のTSF範囲に直接置換します。対象とAI用の文脈もTSFから取得します。変換中の範囲外の変更は文字種ではなく、保持範囲・参照文脈・選択との関係で検証します。詳細は[範囲検証の設計](docs/TSF_RANGE_VALIDATION.md)を参照してください。
-手動ショートカットは従来のWin32/UIA経路です。自動変換の失敗後にUIAへ切り替えたり、文字を再送したりしません。
-書き込み結果が不明になった場合は停止し、本文確認と再起動を求めます。
+パスワード・読み取り専用欄は対象外です。独自エディターや管理者権限の入力欄など、対応しないアプリがあります。
+合成アプリでの回帰試験と、実アプリ・実IMEでの互換性確認は別に行います。
 
-既存設定で`ime_commit_backend`を省略した場合は互換性のため`"uia"`です。
-従来の自動変換を選ぶ場合は`ime_commit_backend = "uia"`とし、`build_tsf_probe.ps1`で監視DLLをビルドします。
-起動時だけの指定は`--ime-commit-backend tsf`または`--ime-commit-backend uia`です。
-TSF編集DLLを固定する場合は`tsf_edit_path`、UIA方式の監視DLLは従来の`tsf_monitor_path`で指定します。
-
-自動変換は`editor_worker = "python"`の直接編集方式（`edit_backend = "auto"` / `"uia"` / `"win32"`）に対応します。入力先の切り替えに追従し、TSFで観測できない入力欄では手動ショートカットを使用します。パスワード・読み取り専用欄は対象外です。
-
-TSFの未確定範囲が終了し、Enter操作を観測して、確定文字列と実際の本文・カーソルの一致を確認した場合に変換します。IME確定のEnterでは、キーが離れるのを待たずに置換処理へ進みますが、本文・フォーカス・IME状態の確認はそのまま行います。未確定のまま入力を止めても変換しません。推論中に入力・フォーカスが変わった場合は中止し、変換中の通知を後から再実行しません。部分確定・マウス確定は自動変換の対象として保証していません。
-
-確定文字列に漢字またはカタカナ（半角を含む）が1文字でも含まれる場合は、変換済みとして確定文字列全体を自動変換の対象外とし、AIを呼びません。例えば`コーヒーをのむ`や`今日はいいてんき`はそのまま保持します。`こーひー`の長音や、ひらがなの分離した濁点・半濁点は対象外にする理由とはしません。判定対象は今回のIME確定文字列で、周囲の本文は含みません。手動変換は従来どおりです。
-
-自動変換が有効なときでも、変換中に`Ctrl+Enter`で確定した場合は置換せず、読みのまま確定します（Microsoft IMEの`Ctrl+Enter`は全確定）。この抑制を使う場合、手動変換のショートカットに`Ctrl+Enter`を割り当てないでください。`半角全角`などを併用すると区別できます。
-
-TSF直接編集は、Obsidianの同じ箇条書き行での繰り返し置換を、固定結果とAI推論の両方で利用者環境にて確認しています。他アプリ・IMEの互換性は個別に確認してください。`--debug`で監視の登録・確定候補・中止理由を表示します。検証範囲と統合内容は[TSF直接編集資料](docs/TSF_DIRECT_EDIT_TRIAL.md)を参照してください。以前のUIA方式でのChrome/Webメモの確認記録は[TSF監視検証資料](docs/TSF_PROBE.md)にあります。
-
-`--config`を省略すると`config.toml`は読み込まず、プログラム内の既定値を使います。その場合の変換キーはCtrl+Alt+K / Ctrl+Alt+Jです。キーは設定で変更できます。他アプリと競合すると起動を中止します。
-
-日本語キーボードの半角／全角キーも指定できます。`config.toml`で次のように設定し、再起動してください。
-
-```toml
-hotkey_line = "半角全角"
-hotkey_selection = "Shift+半角全角"
-```
-
-`半角/全角`、`半角／全角`、`HankakuZenkaku`、`ZenkakuHankaku`も同じキー名として扱います。単独でもCtrl・Alt・Shift・Winとの組み合わせでも指定できます。IME状態によって変わる2種類のキーコードを登録し、どちらも同じ変換操作へ割り当てます。登録競合時は起動を中止します。実際のキー入力とIMEの挙動は日本語キーボードの環境で確認してください。
-
-半角全角は仮想キーの状態が解放後も残る場合があるため、WindowsのRaw Inputで同じキーボードの押下・解放を監視して適用前に確認します。`--debug` / `--timings`には`適用/半角全角キー解放待ち`を、`--debug`にはRaw Inputの押下・解放の検出回数も表示します。キーを押したまま、または入力監視を確認できない場合は最大2秒で中止します。
-
-## 設定・対応範囲
-
-全項目は[config.example.toml](config.example.toml)を参照してください。`editor_worker`はPython/C++の切り替え、`edit_backend`は入力欄の編集方式、`backend`はAIへの接続方式です。`--editor-worker python`または`native`で、その起動だけ設定を上書きできます。
-
-CPU推論が既定です。GPU対応ランタイムでは`n_gpu_layers = -1`で全層をGPUへ渡せます。`backend = "http"`ではローカルのAPIサーバーも利用できます。設定内のモデル・C++実行ファイルの相対パスは設定ファイルの所在が基準です。
-
-- 標準Edit/RichEditは非表示入力欄で部分置換・改行・絵文字・カーソル復元・Undoを検証しています。
-- UIAはTextPatternによる本文と位置の取得が必要です。Webメモでの手動試行では置換成功を確認しています。他のアプリの互換性は個別に確認してください。
-- 読み取り専用・パスワード欄は対象外です。管理者権限のアプリや端末では利用できない場合があります。
-- UIA入力では対象範囲の選択前にIMEを一時オフにし、選択から送信までの間はIME制御メッセージを送らず、本文・位置の反映確認後に元の状態へ戻します。状態が変わるか確認に失敗した場合は中止し、文字を再送しません。
-- 候補選択、読みの辞書検証、トレイUI、自動起動は未実装です。変換結果の誤りは起こりえます。
-
-変換範囲・IME・中止条件・VS Code/Monacoの設定は[編集処理の詳細](docs/EDITOR_DETAILS.md)を参照してください。
-
-## 診断・速度比較
-
-実操作での不具合を記録するには、普段の起動コマンドに `--diagnostic-log logs\obsidian-repro.log` を追加します。
-端末出力と詳細診断をUTF-8で追記保存します。ログには入力本文・変換対象も含まれます。
-ファイルへの書き込みは別スレッドで行い、選択失敗時にUIA範囲の追加情報を記録します。
-パスを省略して `--diagnostic-log` だけを指定すると、`logs/` 内に日時付きファイルを作ります。
-
-入力欄の能力を確認するには、次を実行して3秒以内に対象へフォーカスを移します。モデルを読み込まず、文字を変更しません。
-
-```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --inspect
-```
-
-処理時間の計測:
-
-```cmd
-.\.venv\Scripts\python.exe -m kana_rewriter --config config.toml --editor-worker python --timings
-```
-
-`時間集計`の`AI以外`は、取得から適用完了までの合計からモデル変換呼び出し時間を引いた値です。内側の工程と通信時間は重複するため、全行を足さないでください。`--debug`では対象本文・文脈・モデル出力も表示します。
-
-AIを使わず編集経路を確認するには、通常起動に `--benchmark-source "さんぽ" --benchmark-result "散歩"` を追加します。完全一致する対象だけを置換します。
-
-## 開発・資料
-
-```cmd
-.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
-```
-
-未ビルドのC++実行ファイルやWindowsに依存するテストは環境によってスキップされます。自動試験はモックを含み、全アプリや実モデルの精度を保証するものではありません。半角全角のRaw Inputは登録・解除と疑似通知を試験しており、実機でのキー操作は別途確認が必要です。TSFの自動変換には合成編集セッション、別プロセス2つへの監視切り替え、標準Editの実置換、通常起動・設定・中止条件の試験を含みます。
-
-資料一覧は[docs/README.md](docs/README.md)、実装の責務と安全条件は[アーキテクチャ](docs/ARCHITECTURE.md)を参照してください。
+[資料一覧](docs/README.md)から、[アーキテクチャ](docs/ARCHITECTURE.md)、[編集処理](docs/EDITOR_DETAILS.md)、
+[TSF範囲検証](docs/TSF_RANGE_VALIDATION.md)、モデルライセンス、過去の調査記録を参照できます。

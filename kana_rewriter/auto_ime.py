@@ -5,7 +5,8 @@ import threading
 import time
 from collections import Counter
 
-from .tsf import NativeProbe, KINDS
+from .tsf import KINDS
+from .tsf_edit import NativeEditProbe
 from .commit_state import CommitState, Commit, Focus, FOCUS_RETRY_MS, invalidates_commit
 
 logger = logging.getLogger(__name__)
@@ -81,10 +82,10 @@ class FocusReader:
 
 
 class AutoImeMonitor:
-    def __init__(self, config, wake, reader_factory=FocusReader, probe_factory=NativeProbe):
+    def __init__(self, config, wake, reader_factory=FocusReader, probe_factory=NativeEditProbe):
         self.config, self.wake = config, wake
         self.reader_factory, self.probe_factory = reader_factory, probe_factory
-        self.state = CommitState(native_context=config.ime_commit_backend == 'tsf')
+        self.state = CommitState()
         self.stopping = threading.Event()
         self.ready = threading.Event()
         self.error = None
@@ -135,7 +136,7 @@ class AutoImeMonitor:
             initialized = True
             # Fail startup for a missing/wrong-architecture DLL, not silently
             # after the user has enabled the setting.
-            native = self.probe_factory(0, self.config.tsf_monitor_path or None)
+            native = self.probe_factory(0, self.config.tsf_edit_path or None)
             self.reader = self.reader_factory()
             self.ready.set()
             field = rejected = None
@@ -155,20 +156,11 @@ class AutoImeMonitor:
                         self.wake()
                 focus_seconds = time.perf_counter() - focus_started
                 if not self.state.same_focus(current, field):
-                    if probe is not None and (self.state.native_context or current is None
-                                              or field is None or current.tid != field.tid):
+                    if probe is not None:
                         clean = probe.close()
                         probe = None
                         if not clean:
                             raise RuntimeError("入力先変更時のTSF監視解除を確認できません。自動変換を停止しました")
-                    # A real target change invalidates queued notices. For TSF
-                    # edits, RuntimeId-only changes are NOT target changes:
-                    # process their context/commit notifications in order below.
-                    if probe is not None:
-                        discarded = probe.drain()
-                        logger.debug("TSF入力先変更時の通知破棄: old=%r / new=%r / events=%s",
-                                     field, current, [(e['kind'], e['tick'], e['composition_tick'],
-                                                       len(e['text'])) for e in discarded])
                 field = current
                 now = self.reader.now()
                 if field is not None and probe is None and (field != rejected or now >= retry_at):
@@ -202,7 +194,7 @@ class AutoImeMonitor:
                         old_probe, probe = probe, None
                         if not old_probe.close():
                             raise RuntimeError("TSF通知欠落後に古い監視の解除を確認できませんでした")
-                        native = self.probe_factory(0, self.config.tsf_monitor_path or None)
+                        native = self.probe_factory(0, self.config.tsf_edit_path or None)
                         counts = Counter(KINDS.get(event['kind'], str(event['kind'])) for event in events)
                         ticks = [event['tick'] for event in events]
                         logger.warning(
@@ -249,17 +241,3 @@ class AutoImeMonitor:
             self.thread.join(timeout=3)
             if self.thread.is_alive():
                 logger.warning("TSF監視スレッドの終了を確認できませんでした")
-
-
-def capture_commit(desktop, monitor, commit):
-    """Wait for the real editor snapshot; retries are read-only."""
-    deadline = time.monotonic() + 0.7
-    while True:
-        if not monitor.valid(commit):
-            raise RuntimeError("IME確定後に入力・フォーカスが変わったため中止しました")
-        try:
-            return desktop.capture_commit(commit.text, commit.focus.target, commit.focus.runtime)
-        except RuntimeError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.025)
