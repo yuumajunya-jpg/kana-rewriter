@@ -118,7 +118,7 @@ def _run(args, benchmarking):
             raise RuntimeError("ショートカットでの変換はWindows専用です")
         if benchmarking:
             print("AIなし試験: 一致する対象だけを固定結果へ置換します", flush=True)
-        elif config.backend == "llama_cpp":
+        else:
             print("GGUFモデルを読み込んでいます…", flush=True)
             converter.load_model()
         return run_windows(converter, config, debug=args.debug, timings=args.timings,

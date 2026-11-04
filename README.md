@@ -20,7 +20,7 @@ copy config.example.toml config.toml
 ```
 
 既存の`config.toml`は上書きせず、そのまま利用してください。
-モデルのSHA256、jinenへの切り替え、HTTP接続は[モデル資料](MODELS.md)を参照してください。
+モデルのSHA256、jinenへの切り替えは[モデル資料](MODELS.md)を参照してください。
 zenzは読み込み時にトークナイザーの設定名を上書きします。GGUFファイルは変更しません。
 `llama-cpp-python 0.3.36`で動作確認済みです。構築にC++開発環境が必要になる場合があります。
 
@@ -86,6 +86,8 @@ TSFで未確定文字・位置を公開する64ビットアプリが対象です
 `--config`を省略すると設定ファイルを自動読込せず、プログラムの既定値を使います。
 その場合の手動キーはCtrl+Alt+K / Ctrl+Alt+Jです。
 zenzの左右文脈はそれぞれ`context_chars`文字まで（既定64）、jinenは左文脈だけを使います。
+
+推論はローカルGGUFの直接読み込みに統一しました。旧設定の`backend = "llama_cpp"`は指定不要ですが、そのまま読み込めます。`backend = "http"`を指定した設定はエラーになります。
 
 旧設定の`editor_worker = "python"`と`ime_commit_backend = "tsf"`は読み込み時に受け入れますが、指定は不要です。
 C++編集、クリップボード編集、UIA自動変換は廃止しました。旧方式を明示した設定はエラーになります。

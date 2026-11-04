@@ -55,8 +55,6 @@ v2は左文脈が空なら`\uEE02`を省略し、組み立てたプロンプト�
 
 `config.example.toml`が設定例です。`--config`を省略すると既定値を使用し、`config.toml`は自動読み込みしません。
 
-`backend = "http"`も使用できます。専用モデルは`/v1/completions`、chatは`/v1/chat/completions`を指定します。接続はローカルに限定し、プロキシとリダイレクトを無効化します。`timeout_seconds`はHTTP専用で、直接推論の時間制限はありません。
-
 既存の`config.toml`でも、新しい項目を省略した場合は漢字・「。」が区切りになります。明示する場合は次を追加し、待ち受けプロセスを再起動してください。
 
 ```toml

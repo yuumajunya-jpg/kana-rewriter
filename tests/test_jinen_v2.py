@@ -37,13 +37,15 @@ class JinenV2Tests(unittest.TestCase):
         self.assertEqual(request["repeat_penalty"], 1.0)
         client.llm.create_chat_completion.assert_not_called()
 
-    def test_http_completion_and_selection_preserve_original_surrounding_text(self):
-        client = Converter(Config(backend="http", model_format="jinen_v2"))
-        client._http = Mock(return_value={
-            "choices": [{"text": "今日", "finish_reason": "stop"}]})
+    def test_local_selection_preserves_original_surrounding_text(self):
+        client = Converter(Config(model_format="jinen_v2"))
+        client.llm = Mock()
+        client.llm.tokenize.side_effect = lambda text, **kwargs: text.decode("utf-8")
+        client.llm.create_completion.return_value = {
+            "choices": [{"text": "今日", "finish_reason": "stop"}]}
         self.assertEqual(client.convert_selection("Ａ①きょう！", "ｶﾞ", "右文脈"),
                          "Ａ①今日！")
-        request = client._http.call_args.args[0]
+        request = client.llm.create_completion.call_args.kwargs
         self.assertEqual(request["prompt"], "\uee02ガA1\uee00キョウ\uee01")
         self.assertEqual(request["top_k"], 1)
 

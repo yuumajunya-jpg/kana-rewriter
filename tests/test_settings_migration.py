@@ -38,3 +38,19 @@ model_format = "jinen_v2"
         example = Config.load(Path(__file__).resolve().parents[1] / "config.example.toml")
         self.assertEqual(example.model_format, Config().model_format)
         self.assertTrue(Config().model_path.endswith("zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"))
+
+    def test_existing_local_inference_settings_remain_loadable(self):
+        config = self.load('''backend = "llama_cpp"
+endpoint = "http://127.0.0.1:8080/v1/completions"
+model = "local"
+timeout_seconds = 30
+api_key_env = "KANA_REWRITER_API_KEY"
+model_format = "jinen_v2"
+max_tokens = 128
+''')
+        self.assertEqual(config.model_format, "jinen_v2")
+        self.assertEqual(config.max_tokens, 128)
+
+    def test_http_configuration_is_rejected_instead_of_silently_switching(self):
+        with self.assertRaisesRegex(ValueError, "backend.*廃止"):
+            self.load('backend = "http"')

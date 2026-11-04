@@ -1,11 +1,7 @@
 from dataclasses import dataclass
-import json
-import os
 import logging
 from pathlib import Path
 import tomllib
-from urllib.parse import urlsplit
-from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from .text import TextRegion, zenz_prompt, jinen_prompt, jinen_v2_prompt, MARKERS, reading_spans, TRAILING_PUNCTUATION
 from .hotkeys import parse_hotkey
@@ -14,19 +10,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Config:
-    backend: str = "llama_cpp"
     model_path: str = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
     model_format: str = "zenz_v3_2"
     context_chars: int = 64
     n_ctx: int = 0
     n_gpu_layers: int = 0
     chat_format: str | None = None
-    endpoint: str = "http://127.0.0.1:8080/v1/completions"
-    model: str = "local"
-    timeout_seconds: float = 30
     max_chars: int = 1000
     max_tokens: int = 256
-    api_key_env: str = "KANA_REWRITER_API_KEY"
     conversion_delimiters: str = "。"
     stop_at_kanji: bool = True
     trailing_punctuation: str = TRAILING_PUNCTUATION
@@ -69,20 +60,12 @@ class Config:
                 or not isinstance(self.trailing_punctuation, str)
                 or not isinstance(self.stop_at_kanji, bool)):
             raise ValueError("conversion_delimiters・trailing_punctuationは文字列、stop_at_kanjiは真偽値です")
-        if self.backend not in {"llama_cpp", "http"}:
-            raise ValueError("backendはllama_cppまたはhttpです")
         if self.model_format not in {"jinen_v1", "jinen_v2", "zenz_v3_2", "chat"}:
             raise ValueError("model_formatはjinen_v1、jinen_v2、zenz_v3_2、chatです")
         if not 0 <= self.context_chars <= 1000:
             raise ValueError("context_charsは0〜1000です")
         if not self.model_path or (self.n_ctx != 0 and self.n_ctx < 512) or self.n_gpu_layers < -1:
             raise ValueError("モデルの設定が不正です")
-        url = urlsplit(self.endpoint)
-        if (url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost", "::1"}
-                or url.username or url.password or url.query or url.fragment):
-            raise ValueError("endpointはローカルのHTTP URLを指定してください")
-        if not self.model or not 1 <= self.timeout_seconds <= 300:
-            raise ValueError("model、timeout_secondsの設定が不正です")
         if not 1 <= self.max_chars <= 10000 or not 1 <= self.max_tokens <= 32768:
             raise ValueError("max_chars、max_tokensの設定が不正です")
 
@@ -93,10 +76,11 @@ class Config:
         # Accept redundant settings from earlier Python/TSF configurations.
         # Reject removed editing methods instead of silently changing behavior.
         for key, supported in {"editor_worker": "python", "ime_commit_backend": "tsf",
-                               "native_uia_wait": "poll"}.items():
+                               "native_uia_wait": "poll", "backend": "llama_cpp"}.items():
             if key in values and values.pop(key) != supported:
-                raise ValueError(f"{key}の旧方式は廃止しました。手動編集はPython、自動変換はTSFを使用します")
-        for key in ("native_worker_path", "tsf_monitor_path", "paste_wait_seconds"):
+                raise ValueError(f"{key}の旧方式は廃止しました。手動編集はPython、自動変換はTSF、推論はローカルGGUFを使用します")
+        for key in ("native_worker_path", "tsf_monitor_path", "paste_wait_seconds",
+                    "endpoint", "model", "timeout_seconds", "api_key_env"):
             values.pop(key, None)
         model_path = Path(values.get("model_path", cls.model_path))
         if not model_path.is_absolute():
@@ -116,9 +100,6 @@ PROMPT = """あなたは日本語のかな漢字変換エンジンです。
 変換結果の文字列だけを返し、説明、引用符、Markdown、思考過程を付けないでください。"""
 
 
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError("ローカルAIからのリダイレクトを拒否しました")
 
 
 class Converter:
@@ -127,7 +108,7 @@ class Converter:
         self.llm = None
 
     def load_model(self):
-        if self.config.backend != "llama_cpp" or self.llm is not None:
+        if self.llm is not None:
             return
         if not Path(self.config.model_path).is_file():
             raise ValueError("GGUFモデルがありません。config.tomlのmodel_pathを指定してください")
@@ -144,7 +125,7 @@ class Converter:
                              kv_overrides=overrides, verbose=False)
         except (ValueError, TypeError) as exc:
             hint = (" zenz系の公式GGUFは独自のpre-tokenizer名を持ちます。"
-                    "古いllama-cpp-pythonでは読み込めないため、更新するかREADMEのサーバー経由を使用してください。"
+                    "古いllama-cpp-pythonでは読み込めないため、更新してください。"
                     if self.config.model_format == "zenz_v3_2" else "")
             raise RuntimeError("GGUFの読み込みに失敗しました。パスとランタイムの対応を確認してください。" + hint) from exc
 
@@ -159,20 +140,17 @@ class Converter:
                 prompt = jinen_prompt(source, left_context, c.context_chars)
             else:
                 prompt = zenz_prompt(source, left_context, right_context, c.context_chars)
-            request = {"model": c.model, "prompt": prompt, "temperature": 0,
+            request = {"prompt": prompt, "temperature": 0,
                        "repeat_penalty": 1.0, "max_tokens": c.max_tokens,
                        "stop": ["</s>"], "stream": False, "echo": False}
             if c.model_format == "jinen_v2":
                 request["top_k"] = 1
-            if c.backend == "llama_cpp":
-                self.load_model()
-                # Pass token IDs to avoid automatically inserting BOS/EOS.
-                # Special=True recognizes the protocol markers in the GGUF tokenizer.
-                tokens = self.llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True)
-                request["prompt"] = tokens
-                payload = self.llm.create_completion(**request)
-            else:
-                payload = self._http(request)
+            self.load_model()
+            # Pass token IDs to avoid automatically inserting BOS/EOS.
+            # Special=True recognizes the protocol markers in the GGUF tokenizer.
+            tokens = self.llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True)
+            request["prompt"] = tokens
+            payload = self.llm.create_completion(**request)
             result = self._validate(payload, completion=True)
             if any(character.isspace() for character in result):
                 raise ValueError("変換専用モデルが空白・改行を出力したため中止しました")
@@ -181,7 +159,6 @@ class Converter:
         left = left_context[-context_chars:] if context_chars else ""
         right = right_context[:context_chars] if context_chars else ""
         request = {
-            "model": c.model,
             "messages": [{"role": "system", "content": PROMPT +
                           (f"\n参考の左文脈: {left}\n参考の右文脈: {right}\n"
                            "ユーザーの変換対象のみを返してください。" if left or right else "")},
@@ -190,11 +167,8 @@ class Converter:
             "max_tokens": c.max_tokens,
             "stream": False,
         }
-        if c.backend == "llama_cpp":
-            self.load_model()
-            payload = self.llm.create_chat_completion(**request)
-        else:
-            payload = self._http(request)
+        self.load_model()
+        payload = self.llm.create_chat_completion(**request)
         result = self._validate(payload)
         for character in ("\n", "\r", "\t"):
             if result.count(character) != source.count(character):
@@ -221,20 +195,6 @@ class Converter:
         logger.debug("選択範囲の変換結果=%r", result)
         return result
 
-    def _http(self, request):
-        c = self.config
-        body = json.dumps(request).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if key := os.environ.get(c.api_key_env):
-            headers["Authorization"] = "Bearer " + key
-        # Never forward selected text through an environment-configured proxy.
-        opener = build_opener(ProxyHandler({}), NoRedirect())
-        with opener.open(Request(c.endpoint, data=body, headers=headers),
-                         timeout=c.timeout_seconds) as response:
-            data = response.read(1024 * 1024 + 1)
-        if len(data) > 1024 * 1024:
-            raise ValueError("AIの応答が大きすぎます")
-        return json.loads(data)
 
     def _validate(self, payload, completion=False):
         c = self.config
@@ -242,7 +202,7 @@ class Converter:
             choice = payload["choices"][0]
             result = choice["text"] if completion else choice["message"]["content"]
             finished = choice["finish_reason"]
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        except (KeyError, IndexError, TypeError) as exc:
             raise ValueError("AIの応答形式が不正です") from exc
         if finished != "stop":
             raise ValueError("AIの出力が正常に完了しなかったため中止しました")

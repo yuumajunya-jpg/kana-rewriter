@@ -1,8 +1,5 @@
-import json
 from pathlib import Path
 import tempfile
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import unittest
 from unittest.mock import Mock, patch
 
@@ -45,7 +42,6 @@ class CoreTests(unittest.TestCase):
             convert.assert_not_called()
 
 
-
     def test_direct_model_is_cached_and_uses_chat_api(self):
         with tempfile.NamedTemporaryFile(suffix=".gguf") as file:
             model = Mock()
@@ -80,10 +76,6 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(Config.load(str(path)).model_path,
                              str(Path(directory) / "models/test.gguf"))
 
-    def test_rejects_remote_endpoint(self):
-        for endpoint in ("https://example.com/v1/chat/completions", "http://localhost@example.com/x"):
-            with self.assertRaises(ValueError):
-                Config(endpoint=endpoint)
 
     def test_refuses_empty_or_excessive_source(self):
         for source in (" ", "あ" * 1001):
@@ -110,8 +102,6 @@ class CoreTests(unittest.TestCase):
                 client.convert("きょう")
 
 
-
-
     def test_missing_edit_token_cannot_use_legacy_editing(self):
         desktop = Mock()
         with self.assertRaisesRegex(RuntimeError, "編集トークン"):
@@ -122,32 +112,6 @@ class CoreTests(unittest.TestCase):
         desktop = Mock()
         self.assertFalse(apply_result(desktop, Capture("今日", None), "今日"))
         self.assertEqual(desktop.mock_calls, [])
-
-    def test_http_integration(self):
-        requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                body = json.dumps(response(), ensure_ascii=False).encode("utf-8")
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *args):
-                pass
-
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            client = Converter(Config(backend="http", model_format="chat", endpoint=f"http://127.0.0.1:{server.server_port}/v1/chat/completions"))
-            self.assertEqual(client.convert("きょうはいいてんきです"), "今日は良い天気です")
-            self.assertFalse(requests[0]["stream"])
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
 
 
 if __name__ == "__main__":

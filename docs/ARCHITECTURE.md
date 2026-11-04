@@ -37,7 +37,7 @@
 - 手動変換: Pythonの編集ワーカー。標準Edit/RichEditはWin32、それ以外はUIA。
 - Enter確定後の自動変換: TSF確定範囲への直接編集。漢字・カタカナを含む確定文字列は全体をAIへ渡さない。
 - プレビュー: TSF読み取り専用DLL、Pythonの状態管理・推論、Win32小窓。横位置は最初の有効座標に固定し、縦位置は追従する。角丸を使わない。
-- モデル: 既定はzenz-v3.2-xsmall。jinen v1/v2、chat、ローカルHTTP接続も維持する。
+- モデル: 既定はzenz-v3.2-xsmall。jinen v1/v2、chatも維持する。推論はローカルGGUFの直接読み込みに統一し、HTTP接続は廃止した。
 
 C++編集ワーカー、クリップボード編集、UIA自動変換、単独TSF試験CLIは廃止した。
 `native/tsf_probe.cpp`と`tsf.NativeProbe`は現行プレビューの共通基盤として残す。

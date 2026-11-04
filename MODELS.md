@@ -53,17 +53,7 @@ SHA256: `00c64b3d318045a708d0cad5434faccab10f5481a49e6362864551fd0995fa58`。
 直接読み込む場合は、公式GGUFをそのまま指定します。pre-tokenizer名の上書きはアプリが行います。
 
 ```toml
-backend = "llama_cpp"
 model_path = "models/zenz-v3.2-xsmall/ggml-model-Q5_K_M.gguf"
-model_format = "zenz_v3_2"
-```
-
-azooKeyのllama.cppフォークの`llama-server`を使う場合は、公式GGUFのまま`backend = "http"`で接続します。azooKeyの[llama.cppリリースb4846](https://github.com/azooKey/llama.cpp/releases/tag/b4846)のWindowsバイナリーで動作確認済みです。展開先で`llama-server.exe -m <GGUFのパス> --host 127.0.0.1 --port 8080 -c 1024`を実行し、サーバー起動後にアプリを起動します。
-
-```toml
-backend = "http"
-endpoint = "http://127.0.0.1:8080/v1/completions"
-model = "local"
 model_format = "zenz_v3_2"
 ```
 

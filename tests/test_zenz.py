@@ -154,16 +154,19 @@ class ZenzTests(unittest.TestCase):
                 client.convert("はいしゃ")
 
     def test_replacement_preserves_original_context_not_trimmed_prompt(self):
+        from kana_rewriter.editor import replacement_plan
         desktop = Mock()
         region = TextRegion("長い文脈。歯が痛いので、", "はいしゃ", "に行く。後ろの文")
         original = region.rebuild(region.target)
-        capture = Capture(original, ("window", 1, 2), region)
-        desktop.stamp.return_value = capture.stamp
-        desktop.copy_selection.return_value = original
+        capture = Capture(original, ("window", 1, 2), region,
+                          len(region.left + region.target), edit_token=1)
+        desktop.apply.return_value = True
         self.assertEqual(capture.source, "はいしゃ")
         self.assertTrue(apply_result(desktop, capture, "歯医者"))
-        desktop.replace.assert_called_once_with(region.rebuild("歯医者"), "window",
-                                              caret=len(region.left + "歯医者"))
+        desktop.apply.assert_called_once_with(capture, "歯医者")
+        self.assertEqual(replacement_plan(capture, "歯医者"),
+                         (len(region.left), len(region.left + region.target),
+                          region.rebuild("歯医者"), len(region.left + "歯医者")))
 
     def test_region_no_change_does_not_reinsert_line(self):
         desktop = Mock()
