@@ -51,7 +51,8 @@ class PreviewStream:
             self.before, self.after = event.get('before', ''), event.get('after', '')
             position = preview_position(event)
             if position is not None:
-                self.position = position
+                self.position = (self.position[0] if self.position is not None else position[0],
+                                 position[1])
         # Editing(active=0) precedes the commit/cancel notification in a batch.
         # Errors, missing layout and partially replaced composition identities
         # do not prove that input has ended.

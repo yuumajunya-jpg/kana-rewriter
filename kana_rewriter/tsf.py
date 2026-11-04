@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from .text import reading_spans
+from .text import reading_spans, is_hiragana, is_kanji, is_katakana
 from .notifications import NotificationPump
 
 KINDS = {1: "attached", 2: "context", 3: "editing", 4: "commit_candidate",
@@ -92,8 +92,7 @@ class NativeProbe:
 
 
 def eligible(event, now, target):
-    """Application policy: plain Enter commits containing kana; Ctrl+Enter is
-    a user-requested commit without replacement."""
+    """Auto-convert Enter commits with readings, preserving converted commits."""
     if event["kind"] != 4:
         return False, "not_candidate"
     if event["key"] != 0x0D:
@@ -106,6 +105,11 @@ def eligible(event, now, target):
         return False, "focus_changed"
     if not 0 <= now - event["tick"] <= COMMIT_MAX_AGE_MS:
         return False, "expired"
+    # Shared marks such as ー and decomposed dakuten are also used in
+    # hiragana readings. They alone do not prove an IME conversion.
+    if any(is_kanji(c) or (is_katakana(c) and not is_hiragana(c))
+           for c in event["text"]):
+        return False, "already_converted"
     if not event["text"] or not any(reading_spans(event["text"])):
         return False, "no_kana"
     return True, "eligible"

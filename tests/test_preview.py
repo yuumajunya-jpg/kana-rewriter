@@ -107,6 +107,28 @@ class PreviewTests(unittest.TestCase):
         self.assertFalse(stream.active)
         self.assertIsNone(stream.position)
 
+    def test_stream_keeps_initial_x_and_tracks_y_until_session_ends(self):
+        stream = PreviewStream()
+        def edit(x, y, valid=1):
+            stream.observe(dict(kind=3, active=1, text='さんぽ', position_valid=valid,
+                                left=x - 10, right=x, top=y - 20, bottom=y))
+        edit(100, 120, valid=0)
+        self.assertIsNone(stream.position)
+        edit(110, 120)
+        edit(200, 120)
+        self.assertEqual(stream.position, (110, 120))
+        edit(20, 150)
+        self.assertEqual(stream.position, (110, 150))
+        edit(300, 200, valid=0)
+        self.assertEqual(stream.position, (110, 150))
+        for kind in (2, 4, 5, 7):
+            stream.observe(dict(kind=kind))
+            self.assertIsNone(stream.position)
+            edit(250, 180)
+            self.assertEqual(stream.position, (250, 180))
+            edit(300, 210)
+            self.assertEqual(stream.position, (250, 210))
+
     def test_full_target_and_preserved_parts_are_not_dropped(self):
         target = stream_target('前。きょうは', 'いいてんき。', '後の文', Config())
         self.assertEqual(target.target, 'きょうはいいてんき')

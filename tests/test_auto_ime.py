@@ -158,6 +158,15 @@ class NativeContextStateTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_converted_commit_is_not_queued_for_either_backend(self):
+        for native_context in (False, True):
+            for text in ('コーヒーをのむ', '今日はいいてんき'):
+                with self.subTest(native_context=native_context, text=text):
+                    state = CommitState(native_context=native_context)
+                    state.track(FIELD, 1)
+                    state.observe([event(4, text=text, commit_id=1, revision=185)], 100)
+                    self.assertIsNone(state.take(100))
+
     def setUp(self):
         self.state = CommitState()
         self.state.track(FIELD)
@@ -458,8 +467,8 @@ class WatcherTests(unittest.TestCase):
         new_probe.dropped.return_value = 0
         old_probe.drain.return_value = [event(4, text='欠落したバッチ')]
         new_probe.drain.side_effect = [
-            [event(1), event(4, tick=155, composition_tick=110, text='古い入力'),
-             event(4, tick=155, composition_tick=150, text='新しい入力')], []]
+            [event(1), event(4, tick=155, composition_tick=110, text='ふるいにゅうりょく'),
+             event(4, tick=155, composition_tick=150, text='あたらしいにゅうりょく')], []]
         factory = Mock(side_effect=[old_probe, new_probe])
         monitor = AutoImeMonitor(Config(), Mock(), reader_factory=lambda: reader, probe_factory=factory)
         monitor.state.track(FIELD, 0)
@@ -484,7 +493,7 @@ class WatcherTests(unittest.TestCase):
                 self.assertLogs('kana_rewriter.auto_ime', level='WARNING') as logs:
             monitor._run()
         self.assertIsNone(monitor.error)
-        self.assertEqual(observed[0].text, '新しい入力')
+        self.assertEqual(observed[0].text, 'あたらしいにゅうりょく')
         self.assertEqual(factory.call_count, 2)
         old_probe.start.assert_called_once()
         old_probe.close.assert_called_once()

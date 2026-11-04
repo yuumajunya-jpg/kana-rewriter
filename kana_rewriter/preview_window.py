@@ -25,7 +25,7 @@ def layout_metrics(dpi):
             'top': round(8 * scale), 'bottom': round(9 * scale),
             'single_top': round(11 * scale), 'single_bottom': round(12 * scale),
             'reading': round(15 * scale), 'result': round(23 * scale),
-            'radius': round(10 * scale), 'bar_left': round(8 * scale),
+            'bar_left': round(8 * scale),
             'bar_top': round(9 * scale), 'bar_width': max(2, round(3 * scale)),
             'border': max(1, round(scale))}
 
@@ -81,11 +81,10 @@ class PreviewWindow:
         u.SetTimer.argtypes = [W.HWND, C.c_size_t, W.UINT, C.c_void_p]
         u.DrawTextW.argtypes = [W.HDC, W.LPCWSTR, C.c_int, C.POINTER(W.RECT), W.UINT]
         u.FillRect.argtypes = [W.HDC, C.POINTER(W.RECT), W.HBRUSH]
-        u.SetWindowRgn.argtypes = [W.HWND, W.HANDLE, W.BOOL]
         g.CreateSolidBrush.argtypes = [W.DWORD]
         g.CreateSolidBrush.restype = W.HBRUSH
-        g.CreateRoundRectRgn.argtypes = [C.c_int] * 6
-        g.CreateRoundRectRgn.restype = W.HANDLE
+        g.CreateRectRgn.argtypes = [C.c_int] * 4
+        g.CreateRectRgn.restype = W.HANDLE
         g.FrameRgn.argtypes = [W.HDC, W.HANDLE, W.HBRUSH, C.c_int, C.c_int]
         g.CreateFontW.argtypes = [C.c_int] * 5 + [W.DWORD] * 8 + [W.LPCWSTR]
         g.CreateFontW.restype = W.HANDLE
@@ -105,7 +104,6 @@ class PreviewWindow:
         self.anchor_line = None
         self.above = False
         self.visible = False
-        self.dwm_rounded = False
         self.brush = g.CreateSolidBrush(BACKGROUND)
         self.accent_brush = g.CreateSolidBrush(ACCENT)
         self.border_brush = g.CreateSolidBrush(BORDER)
@@ -114,7 +112,7 @@ class PreviewWindow:
         kernel.GetModuleHandleW.restype = W.HINSTANCE
         self.instance = kernel.GetModuleHandleW(None)
         # CS_DROPSHADOW gives the card a shadow without a layered window, so
-        # ClearType stays available. DWM rounds the corners on Windows 11.
+        # ClearType stays available.
         cls = WindowClass(0x00020000, self.callback, 0, 0, self.instance, None, None, None, None,
                           'KanaConversionPreview')
         if not u.RegisterClassW(C.byref(cls)):
@@ -123,7 +121,7 @@ class PreviewWindow:
                                       0, 0, 1, 1, None, None, self.instance, None)
         if not self.hwnd:
             raise C.WinError(C.get_last_error())
-        self._round_corners()
+        self._disable_rounded_corners()
         # GetDpiForWindow requires a window on the destination monitor. Move a
         # hidden STATIC helper, never the visible candidate, to obtain that DPI.
         self.dpi_hwnd = u.CreateWindowExW(0x08000080, 'STATIC', '', 0x80000000,
@@ -136,22 +134,21 @@ class PreviewWindow:
             self.close()
             raise C.WinError(C.get_last_error())
 
-    def _round_corners(self):
+    def _disable_rounded_corners(self):
         try:
             dwm = C.WinDLL('dwmapi')
             dwm.DwmSetWindowAttribute.argtypes = [W.HWND, W.DWORD, C.c_void_p, W.DWORD]
-            preference = C.c_int(2)  # DWMWCP_ROUND
-            self.dwm_rounded = dwm.DwmSetWindowAttribute(
+            preference = C.c_int(1)  # DWMWCP_DONOTROUND
+            dwm.DwmSetWindowAttribute(
                 self.hwnd, 33, C.cast(C.byref(preference), C.c_void_p),
-                C.sizeof(preference)) == 0
+                C.sizeof(preference))
         except OSError:
-            self.dwm_rounded = False
+            pass
 
     def _paint(self, dc):
         metrics = layout_metrics(self.dpi)
         self.user.FillRect(dc, C.byref(self.rect), self.brush)
-        region = self.gdi.CreateRoundRectRgn(0, 0, self.rect.right + 1, self.rect.bottom + 1,
-                                             metrics['radius'] * 2, metrics['radius'] * 2)
+        region = self.gdi.CreateRectRgn(0, 0, self.rect.right, self.rect.bottom)
         if region:
             self.gdi.FrameRgn(dc, region, self.border_brush, metrics['border'], metrics['border'])
             self.gdi.DeleteObject(region)
@@ -288,12 +285,6 @@ class PreviewWindow:
         if geometry != self.geometry or not self.visible:
             if not self.user.SetWindowPos(self.hwnd, -1, *geometry, 0x50):
                 raise C.WinError(C.get_last_error())
-            if not self.dwm_rounded:
-                # Older Windows: clip the card to the same rounded shape.
-                region = self.gdi.CreateRoundRectRgn(
-                    0, 0, width + 1, height + 1, metrics['radius'] * 2, metrics['radius'] * 2)
-                if region and not self.user.SetWindowRgn(self.hwnd, region, True):
-                    self.gdi.DeleteObject(region)
             self.geometry = geometry
             self.visible = True
         if changed:

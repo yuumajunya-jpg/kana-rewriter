@@ -54,6 +54,18 @@ class TrialGateTests(unittest.TestCase):
             with self.subTest(updates=updates, now=now, target=target):
                 self.assertFalse(eligible({**event, **updates}, now, target)[0])
 
+    def test_auto_conversion_skips_entire_commit_containing_kanji_or_katakana(self):
+        event = dict(kind=4, key=13, pid=3, hwnd=2, tick=100, modifiers=0)
+        for text in ('カタカナ', 'コーヒーをのむ', 'きょうはカフェにいく',
+                     '今日はいいてんき', '散歩', 'ｶﾌｪにいく', '𠮷にいく', '々かな'):
+            with self.subTest(text=text):
+                self.assertEqual(eligible({**event, 'text': text}, 120, (1, 2, 3)),
+                                 (False, 'already_converted'))
+        for text in ('さんぽ', 'こーひー', 'か\u3099っこう', 'さんぽ。'):
+            with self.subTest(text=text):
+                self.assertEqual(eligible({**event, 'text': text}, 120, (1, 2, 3)),
+                                 (True, 'eligible'))
+
     def test_new_composition_focus_or_keys_invalidate_inference(self):
         self.assertFalse(invalidates([]))
         for kind in (2, 3, 4, 5, 6, 7, 8, 9):
