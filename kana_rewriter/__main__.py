@@ -31,7 +31,7 @@ class FixedConverter:
     def __init__(self, source, result):
         self.source, self.result = source, result
 
-    def convert_selection(self, source, left_context, right_context):
+    def convert_selection(self, source, left_context, right_context, *, cancel=None):
         if source != self.source:
             raise RuntimeError("比較用の変換対象と一致しないため中止しました")
         return self.result
@@ -182,7 +182,7 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                     return 0
                 if action in (1, 2) and pending is None:
                     if live_preview is not None:
-                        live_preview.paused.set()
+                        live_preview.pause()
                     if auto_monitor is not None:
                         auto_monitor.begin()
                     try:
@@ -200,7 +200,7 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                         print("変換中…", flush=True)
                     except Exception as exc:
                         if live_preview is not None:
-                            live_preview.paused.clear()
+                            live_preview.resume()
                         if auto_monitor is not None:
                             auto_monitor.finish()
                         flush_logs()
@@ -209,7 +209,7 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                 commit = auto_monitor.take()
                 if commit is not None and auto_monitor.begin(commit):
                     if live_preview is not None:
-                        live_preview.paused.set()
+                        live_preview.pause()
                     try:
                         started = time.perf_counter()
                         prepared = tsf_editor.prepare(commit)
@@ -225,7 +225,7 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                         print("IME確定: 変換中…", flush=True)
                     except Exception as exc:
                         if live_preview is not None:
-                            live_preview.paused.clear()
+                            live_preview.resume()
                         auto_monitor.finish()
                         flush_logs()
                         print(f"自動変換を中止: {exc}", flush=True)
@@ -261,7 +261,7 @@ def run_windows(converter, config, debug=False, timings=False, preview=False):
                             return 1
                 finally:
                     if live_preview is not None:
-                        live_preview.paused.clear()
+                        live_preview.resume()
                     if auto_monitor is not None:
                         auto_monitor.finish()
             if auto_monitor is not None:

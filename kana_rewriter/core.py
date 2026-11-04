@@ -102,6 +102,15 @@ PROMPT = """あなたは日本語のかな漢字変換エンジンです。
 
 
 
+class ConversionCancelled(Exception):
+    """A superseded preview must never be displayed or applied."""
+
+
+def check_cancelled(cancel):
+    if cancel is not None and cancel.is_set():
+        raise ConversionCancelled()
+
+
 class Converter:
     def __init__(self, config: Config):
         self.config = config
@@ -129,10 +138,16 @@ class Converter:
                     if self.config.model_format == "zenz_v3_2" else "")
             raise RuntimeError("GGUFの読み込みに失敗しました。パスとランタイムの対応を確認してください。" + hint) from exc
 
-    def convert(self, source: str, left_context: str = "", right_context: str = "") -> str:
+    def convert(self, source: str, left_context: str = "", right_context: str = "", *, cancel=None) -> str:
+        check_cancelled(cancel)
         c = self.config
         if not source.strip() or len(source) > c.max_chars:
             raise ValueError("対象が空、または文字数上限を超えています")
+        stopping = {}
+        if cancel is not None:
+            from llama_cpp import StoppingCriteriaList
+            stopping["stopping_criteria"] = StoppingCriteriaList([
+                lambda _tokens, _logits: cancel.is_set()])
         if c.model_format in {"jinen_v1", "jinen_v2", "zenz_v3_2"}:
             if c.model_format == "jinen_v2":
                 prompt = jinen_v2_prompt(source, left_context, c.context_chars)
@@ -146,11 +161,15 @@ class Converter:
             if c.model_format == "jinen_v2":
                 request["top_k"] = 1
             self.load_model()
+            check_cancelled(cancel)
             # Pass token IDs to avoid automatically inserting BOS/EOS.
             # Special=True recognizes the protocol markers in the GGUF tokenizer.
             tokens = self.llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True)
             request["prompt"] = tokens
-            payload = self.llm.create_completion(**request)
+            check_cancelled(cancel)
+            payload = self.llm.create_completion(**request, **stopping)
+            # A stopped completion may report finish_reason="stop" with partial text.
+            check_cancelled(cancel)
             result = self._validate(payload, completion=True)
             if any(character.isspace() for character in result):
                 raise ValueError("変換専用モデルが空白・改行を出力したため中止しました")
@@ -168,30 +187,36 @@ class Converter:
             "stream": False,
         }
         self.load_model()
-        payload = self.llm.create_chat_completion(**request)
+        check_cancelled(cancel)
+        payload = self.llm.create_chat_completion(**request, **stopping)
+        check_cancelled(cancel)
         result = self._validate(payload)
         for character in ("\n", "\r", "\t"):
             if result.count(character) != source.count(character):
                 raise ValueError("AIが改行・タブを変更したため中止しました")
         return result
 
-    def convert_selection(self, source: str, left_context: str = "", right_context: str = "") -> str:
+    def convert_selection(self, source: str, left_context: str = "", right_context: str = "", *, cancel=None) -> str:
         """Convert kana spans, retaining punctuation/kanji/whitespace verbatim."""
+        check_cancelled(cancel)
+        options = {} if cancel is None else {"cancel": cancel}
         if not source.strip() or len(source) > self.config.max_chars:
             raise ValueError("対象が空、または文字数上限を超えています")
         if self.config.model_format == "chat":
-            return self.convert(source, left_context, right_context)
+            return self.convert(source, left_context, right_context, **options)
         parts = []
         position = 0
         for start, end in reading_spans(source):
+            check_cancelled(cancel)
             parts.append(source[position:start])
             logger.debug("選択範囲内のかな対象=%r", source[start:end])
             converted = self.convert(source[start:end], left_context + "".join(parts),
-                                     source[end:] + right_context)
+                                     source[end:] + right_context, **options)
             parts.append(converted)
             position = end
         parts.append(source[position:])
         result = "".join(parts)
+        check_cancelled(cancel)
         logger.debug("選択範囲の変換結果=%r", result)
         return result
 

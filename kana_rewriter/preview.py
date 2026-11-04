@@ -3,6 +3,7 @@ import multiprocessing
 import threading
 import time
 import logging
+from .core import ConversionCancelled, check_cancelled
 
 from .preview_state import (PreviewStream, PreviewDisplay, PreviewGate, PreviewTarget,
                             preview_position, preview_region, stream_target)
@@ -81,6 +82,12 @@ def _read_snapshots(config, output, stop, reader_factory=PreviewFocusReader, ide
     probe = focus = None
     stream = PreviewStream()
     composition_tick = None
+    def publish(snapshot):
+        with output['lock']:
+            changed = snapshot != output.get('value', (0, None))[1]
+            output['value'] = (time.monotonic(), snapshot)
+        if changed and output.get('wake'):
+            output['wake']()
     try:
         while not stop.wait(0.016):
             events = probe.drain() if probe else []
@@ -102,8 +109,7 @@ def _read_snapshots(config, output, stop, reader_factory=PreviewFocusReader, ide
                 if focus is None or target != focus.target or context_changed:
                     stream.clear()
                     composition_tick = None
-                with output['lock']:
-                    output['value'] = (time.monotonic(), None)
+                publish(None)
                 started = time.monotonic()
                 try:
                     current = reader.read() if target is not None else None
@@ -143,8 +149,7 @@ def _read_snapshots(config, output, stop, reader_factory=PreviewFocusReader, ide
                         snapshot = None
                 except Exception:
                     snapshot = None
-            with output['lock']:
-                output['value'] = (time.monotonic(), snapshot)
+            publish(snapshot)
     finally:
         if probe:
             if not probe.close():
@@ -174,6 +179,7 @@ def _preview_window(config, connection, snapshot_reader=_read_snapshots, diagnos
             with shared['lock']:
                 shared['value'] = (0, None)
                 shared['error'] = traceback.format_exc()
+            shared['wake']()
         finally:
             if initialized:
                 comtypes.CoUninitialize()
@@ -200,13 +206,13 @@ def _preview_window(config, connection, snapshot_reader=_read_snapshots, diagnos
                     window.close()
                     return
                 display.accept(generation, result)
+            if snapshot and (display.result or display.reading):
+                window.show(display.result or '', snapshot[2], snapshot[3], display.reading)
+            else:
+                window.hide()
             if gate.ready(now):
                 connection.send((gate.generation, snapshot[1]))
                 gate.requested = True
-            if snapshot and display.result:
-                window.show(display.result, snapshot[2], snapshot[3], display.reading)
-            else:
-                window.hide()
         except (EOFError, BrokenPipeError, OSError):
             stop.set()
             window.close()
@@ -218,6 +224,7 @@ def _preview_window(config, connection, snapshot_reader=_read_snapshots, diagnos
                 stop.set()
                 window.close()
     window = PreviewWindow(poll)
+    shared['wake'] = window.request_poll
     connection.send(('ready', window.hwnd))
     reader_thread.start()
     try:
@@ -235,6 +242,9 @@ class LivePreview:
         self.converter, self.pool = converter, pool
         self.stop = threading.Event()
         self.paused = threading.Event()
+        self.request_lock = threading.Lock()
+        self.cancel = None
+        self.pause_revision = 0
         context = multiprocessing.get_context('spawn')
         self.connection, child = context.Pipe()
         self.process = context.Process(target=_preview_window, args=(config, child), daemon=True,
@@ -258,10 +268,26 @@ class LivePreview:
             self.connection.close()
             raise
 
-    def _convert(self, region, queued_at):
+    def pause(self):
+        # Serialize admission with pause: no preview may slip in ahead of a commit.
+        with self.request_lock:
+            self.paused.set()
+            self.pause_revision += 1
+            if self.cancel is not None:
+                self.cancel.set()
+
+    def resume(self):
+        with self.request_lock:
+            self.paused.clear()
+
+    def _convert(self, region, queued_at, cancel):
         started = time.monotonic()
         try:
-            return self.converter.convert_selection(region.target, region.left, region.right)
+            check_cancelled(cancel)
+            result = self.converter.convert_selection(region.target, region.left, region.right,
+                                                      cancel=cancel)
+            check_cancelled(cancel)
+            return result
         finally:
             logging.getLogger(__name__).debug('プレビュー推論: 待機=%.1fms / 推論=%.1fms',
                                               (started - queued_at) * 1000,
@@ -277,24 +303,40 @@ class LivePreview:
                     if message[0] == 'error':
                         logging.getLogger(__name__).error('プレビュー: %s', message[1])
                     else:
-                        latest = message
+                        with self.request_lock:
+                            latest = None if self.paused.is_set() else (self.pause_revision, message)
                 if pending is not None and pending[1].done():
-                    generation, future = pending
+                    generation, future, cancel = pending
                     pending = None
                     try:
                         result = future.result()
+                    except ConversionCancelled:
+                        logging.getLogger(__name__).debug('プレビュー推論: 確定変換のため中断')
+                        result = ''
                     except Exception:
                         logging.getLogger(__name__).warning('プレビュー推論に失敗しました', exc_info=True)
                         result = ''
-                    self.connection.send((generation, result))
-                if latest and pending is None and not self.paused.is_set():
-                    generation, region = latest
-                    latest = None
-                    pending = (generation, self.pool.submit(self._convert, region, time.monotonic()))
+                    with self.request_lock:
+                        publish = not cancel.is_set()
+                        if self.cancel is cancel:
+                            self.cancel = None
+                    # Pipe I/O must not block the main thread's pause request.
+                    if publish:
+                        self.connection.send((generation, result))
+                with self.request_lock:
+                    if latest and pending is None:
+                        revision, (generation, region) = latest
+                        latest = None
+                        if not self.paused.is_set() and revision == self.pause_revision:
+                            cancel = threading.Event()
+                            self.cancel = cancel
+                            pending = (generation, self.pool.submit(
+                                self._convert, region, time.monotonic(), cancel), cancel)
             except (EOFError, BrokenPipeError, OSError, RuntimeError):
                 return
 
     def close(self):
+        self.pause()
         self.stop.set()
         self.thread.join(timeout=1)
         try:

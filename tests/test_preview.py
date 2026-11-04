@@ -16,6 +16,9 @@ class PreviewTests(unittest.TestCase):
         preview.stop = Mock()
         preview.stop.wait.side_effect = [False, False, False, False, True]
         preview.paused = threading.Event()
+        preview.request_lock = threading.Lock()
+        preview.cancel = None
+        preview.pause_revision = 0
         preview.connection = Mock()
         preview.connection.poll.side_effect = [True, False, False, True, False, False]
         region = TextRegion('', 'ぷれびゅー', '')
@@ -139,6 +142,47 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(target.target, 'がさんぽ')
         self.assertEqual(target.render('が散歩'), '私が散歩。')
 
+    def test_auto_preview_only_converts_live_text_and_keeps_context(self):
+        target = stream_target('前。きょうは', 'いいてんき。', '後の文',
+                               Config(auto_replace_on_ime_commit=True))
+        self.assertEqual(target.target, 'いいてんき。')
+        self.assertEqual(target.left, '前。きょうは')
+        self.assertEqual(target.right, '後の文')
+        self.assertEqual(target.render('良い天気。'), '良い天気。')
+        self.assertEqual(target.reading_text, 'いいてんき。')
+        mixed = stream_target('確定済み', '私がさんぽ。', '後',
+                              Config(auto_replace_on_ime_commit=True))
+        self.assertEqual(mixed.target, '私がさんぽ。')
+        self.assertEqual(mixed.render('私が散歩。'), '私が散歩。')
+        for live in ('', '。', '漢字'):
+            with self.subTest(live=live), self.assertRaises(ValueError):
+                stream_target('きょう', live, '', Config(auto_replace_on_ime_commit=True))
+        config = Config(auto_replace_on_ime_commit=True, max_chars=3)
+        self.assertEqual(stream_target('あ' * 1000, 'さんぽ', '後', config).target, 'さんぽ')
+        with self.assertRaises(ValueError):
+            stream_target('', 'さんぽする', '', config)
+
+    def test_reading_updates_before_inference_and_late_results_never_revert_it(self):
+        display = PreviewDisplay()
+        def observe(live):
+            target = stream_target('前。', live, '', Config())
+            display.observe((live, target, 100, 200, 1, 'session'), 0)
+            return display.gate.generation
+        first = observe('さん')
+        self.assertIsNone(display.result)
+        self.assertEqual(display.reading, 'さん')
+        observe('さんぽ')
+        self.assertEqual(display.reading, 'さんぽ')
+        display.accept(first, '三')
+        self.assertEqual(display.result, '三')
+        self.assertEqual(display.reading, 'さんぽ')
+        observe('さ')
+        self.assertEqual(display.reading, 'さ')
+        self.assertEqual(display.result, '三')
+        display.observe(None, 1)
+        self.assertEqual(display.reading, '')
+        self.assertIsNone(display.result)
+
     def test_inference_slower_than_typing_still_publishes_completed_candidate(self):
         display = PreviewDisplay()
         target = stream_target('', 'さんぽ', '', Config())
@@ -152,16 +196,16 @@ class PreviewTests(unittest.TestCase):
         display.accept(first, '古い候補')
         self.assertEqual(display.result, '散歩する')
 
-    def test_reading_line_hides_identical_or_absent_target(self):
-        target = stream_target('', 'プレビュー', '', Config())
+    def test_reading_line_retains_identical_result_and_hides_absent_target(self):
+        target = stream_target('', 'ありがとう', '', Config())
         display = PreviewDisplay()
         display.observe((target, target, 10, 20, 1, 's1'), 0)
-        display.accept(display.gate.generation, 'プレビュー')
-        self.assertEqual(display.result, 'プレビュー')
-        self.assertEqual(display.reading, '')
+        display.accept(display.gate.generation, 'ありがとう')
+        self.assertEqual(display.result, 'ありがとう')
+        self.assertEqual(display.reading, 'ありがとう')
         display.observe((target, target, 10, 20, 1, 's2'), 1)
-        display.accept(display.gate.generation, 'プレビュー')
-        self.assertEqual(display.reading, '')
+        display.accept(display.gate.generation, 'ありがとう')
+        self.assertEqual(display.reading, 'ありがとう')
         region = TextRegion('', 'さんぽ', '')
         display.observe((region, region, 10, 20, 1, 's3'), 2)
         display.accept(display.gate.generation, '散歩')

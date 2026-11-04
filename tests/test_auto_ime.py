@@ -625,7 +625,8 @@ class WatcherTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows")
 class NormalLoopTests(unittest.TestCase):
-    def run_loop(self, commit=True, valid=True, manual=False, failure=None, capture_failure=None, close_failure=None):
+    def run_loop(self, commit=True, valid=True, manual=False, failure=None, capture_failure=None, close_failure=None,
+                 with_preview=False):
         from kana_rewriter.__main__ import run_windows
         from kana_rewriter import winapi as win
         calls = 0
@@ -654,6 +655,7 @@ class NormalLoopTests(unittest.TestCase):
                 patch("kana_rewriter.auto_ime.AutoImeMonitor") as monitor, \
                 patch("kana_rewriter.direct.Desktop") as desktop, \
                 patch('kana_rewriter.tsf_edit.TsfCommitEditor') as tsf_editor, \
+                patch('kana_rewriter.preview.LivePreview') as preview, \
                 patch("kana_rewriter.__main__.ThreadPoolExecutor") as pool, \
                 patch("kana_rewriter.__main__.apply_result", return_value=True) as apply, patch("builtins.print"):
             monitor.return_value.close.side_effect = close_failure
@@ -661,6 +663,11 @@ class NormalLoopTests(unittest.TestCase):
             monitor.return_value.begin.return_value = True
             monitor.return_value.valid.side_effect = [True, valid]
             pool.return_value.submit.return_value = future
+            def submit(*args):
+                if with_preview:
+                    preview.return_value.pause.assert_called_once()
+                return future
+            pool.return_value.submit.side_effect = submit
             tsf_editor.return_value.capture.side_effect = capture_failure
             tsf_editor.return_value.apply.return_value = True
             tsf_editor.return_value.apply.side_effect = failure
@@ -670,9 +677,15 @@ class NormalLoopTests(unittest.TestCase):
                             hotkey_quit="Ctrl+Alt+Q")
             if close_failure:
                 with self.assertRaisesRegex(type(close_failure),str(close_failure)):
-                    run_windows(Mock(),settings)
+                    run_windows(Mock(),settings,preview=with_preview)
             else:
-                self.assertEqual(run_windows(Mock(),settings),expected_code)
+                self.assertEqual(run_windows(Mock(),settings,preview=with_preview),expected_code)
+            if with_preview:
+                preview.return_value.pause.assert_called_once()
+                preview.return_value.resume.assert_called_once()
+                preview.return_value.close.assert_called_once()
+            else:
+                preview.assert_not_called()
             if manual:
                 desktop.return_value.capture.assert_called_once()
                 apply.assert_called_once()
@@ -687,6 +700,10 @@ class NormalLoopTests(unittest.TestCase):
             pool.return_value.shutdown.assert_called_once_with(wait=True,cancel_futures=True)
 
     def test_normal_startup_processes_commit_and_applies(self): self.run_loop()
+    def test_auto_commit_preempts_preview_before_inference(self): self.run_loop(with_preview=True)
+    def test_manual_conversion_preempts_preview_before_inference(self): self.run_loop(manual=True,with_preview=True)
+    def test_capture_failure_resumes_preview(self):
+        self.run_loop(capture_failure=RuntimeError('capture failed'),with_preview=True)
     def test_input_during_inference_prevents_application(self): self.run_loop(valid=False)
     def test_manual_shortcut_can_be_used_with_auto_enabled(self): self.run_loop(manual=True)
     def test_tsf_failure_does_not_fallback(self): self.run_loop(failure=RuntimeError('rejected'))

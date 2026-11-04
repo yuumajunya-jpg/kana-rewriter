@@ -15,6 +15,7 @@ import queue
 
 from kana_rewriter.core import Config
 from kana_rewriter.preview import PreviewFocusReader, _preview_window
+from kana_rewriter.preview_state import PreviewTarget
 from kana_rewriter.text import TextRegion
 
 
@@ -31,7 +32,8 @@ def snapshot_fixture(config, output, stop):
         snapshot = None
         if value:
             key, source, session = value
-            snapshot = (key, TextRegion('', source, ''), 320, 224, foreground, session)
+            snapshot = (key, PreviewTarget('', source, '', reading_text=source),
+                        320, 224, foreground, session)
         with output['lock']:
             output['value'] = (time.monotonic(), snapshot)
 
@@ -39,6 +41,43 @@ def snapshot_fixture(config, output, stop):
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows native preview')
 class PreviewPipelineTests(unittest.TestCase):
+    def test_latest_reading_is_rendered_before_request_and_kept_with_older_result(self):
+        connection, window = Mock(), Mock()
+        connection.poll.return_value = False
+        window.user.GetForegroundWindow.return_value = 1
+        shared = {}
+        def snapshot(live):
+            return (live, PreviewTarget('', live, '', reading_text=live), 10, 20, 1, 'session')
+        def reader(config, output, stop):
+            shared.update(output=output)
+            output['value'] = (time.monotonic(), snapshot('さん'))
+        def make_thread(*, target, **kwargs):
+            thread = Mock()
+            thread.start.side_effect = target
+            return thread
+        def run():
+            poll = create.call_args.args[0]
+            poll()
+            window.show.assert_called_with('', 10, 20, 'さん')
+            first = connection.send.call_args.args[0][0]
+            shared['output']['value'] = (time.monotonic(), snapshot('さんぽ'))
+            poll()
+            window.show.assert_called_with('', 10, 20, 'さんぽ')
+            connection.poll.side_effect = [True, False]
+            connection.recv.return_value = (first, '三')
+            poll()
+            window.show.assert_called_with('三', 10, 20, 'さんぽ')
+            # Input ends while a result exists: both lines must disappear.
+            shared['output']['value'] = (time.monotonic(), None)
+            connection.poll.side_effect = None
+            poll()
+            window.hide.assert_called()
+        window.run.side_effect = run
+        with patch.dict(sys.modules, {'comtypes': Mock()}), \
+                patch('kana_rewriter.preview.threading.Thread', side_effect=make_thread), \
+                patch('kana_rewriter.preview_window.PreviewWindow', return_value=window) as create:
+            _preview_window(Config(), connection, reader)
+
     def test_uia_validation_does_not_block_each_composition_update(self):
         from kana_rewriter.preview import _read_snapshots
         from kana_rewriter.commit_state import Focus
@@ -60,12 +99,13 @@ class PreviewPipelineTests(unittest.TestCase):
                                   [edit('ぷれびゅ')], [edit('ぷれびゅー')]]
         stop = Mock()
         stop.wait.side_effect = [False, False, False, True]
-        output = {'lock': threading.Lock()}
+        output = {'lock': threading.Lock(), 'wake': Mock()}
         with patch('kana_rewriter.preview.PreviewProbe', return_value=probe):
             _read_snapshots(Config(), output, stop, reader_factory=lambda: reader,
                             identity=lambda: focus.target)
         reader.read.assert_called_once()
         self.assertEqual(output['value'][1][1].target, 'ぷれびゅー')
+        self.assertEqual(output['wake'].call_count, 2)
 
     def test_context_change_revalidates_and_hides_ineligible_field(self):
         from kana_rewriter.preview import _read_snapshots
@@ -90,7 +130,7 @@ class PreviewPipelineTests(unittest.TestCase):
         self.assertIsNone(output['value'][1])
         probe.close.assert_called_once()
 
-    def test_candidate_only_hold_during_inference_and_hide_after_input(self):
+    def test_reading_before_inference_and_candidate_hold_and_hide_after_input(self):
         context = multiprocessing.get_context('spawn')
         parent, child = context.Pipe()
         commands = context.Queue()
@@ -123,7 +163,7 @@ class PreviewPipelineTests(unittest.TestCase):
                         return text.value
                     time.sleep(0.01)
                 self.fail('Native window never displayed: ' + expected)
-            self.assertFalse(u.IsWindowVisible(hwnd), 'No placeholder before first candidate')
+            self.assertTrue(u.IsWindowVisible(hwnd), 'Reading must show before first candidate')
             parent.send((generation, '散歩'))
             self.assertEqual(wait_text('散歩'), '散歩')
             u.GetWindowLongW.argtypes = [W.HWND, C.c_int]

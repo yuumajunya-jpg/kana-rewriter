@@ -45,7 +45,8 @@ class StreamIntegrationTests(unittest.TestCase):
         with Fixture() as fixture:
             config = SimpleNamespace(target=(u.GetForegroundWindow(), 0, fixture.pid), tid=fixture.tid,
                                      conversion_delimiters='。', stop_at_kanji=True,
-                                     trailing_punctuation='。', max_chars=1000)
+                                     trailing_punctuation='。', max_chars=1000,
+                                     auto_replace_on_ime_commit=False)
             context = multiprocessing.get_context('spawn')
             config.focus_changes = context.Queue()
             parent, child = context.Pipe()
@@ -71,7 +72,7 @@ class StreamIntegrationTests(unittest.TestCase):
                     return buffer.value
 
                 deadline = time.monotonic() + 3
-                while not u.IsWindowVisible(hwnd) and time.monotonic() < deadline:
+                while (not u.IsWindowVisible(hwnd) or text() != '散歩') and time.monotonic() < deadline:
                     time.sleep(0.01)
                 self.assertTrue(u.IsWindowVisible(hwnd))
                 fixture.command('layoutmissing')

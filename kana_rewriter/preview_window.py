@@ -79,6 +79,7 @@ class PreviewWindow:
         u.DestroyWindow.argtypes = [W.HWND]
         u.SetWindowTextW.argtypes = [W.HWND, W.LPCWSTR]
         u.SetTimer.argtypes = [W.HWND, C.c_size_t, W.UINT, C.c_void_p]
+        u.PostMessageW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM]
         u.DrawTextW.argtypes = [W.HDC, W.LPCWSTR, C.c_int, C.POINTER(W.RECT), W.UINT]
         u.FillRect.argtypes = [W.HDC, C.POINTER(W.RECT), W.HBRUSH]
         g.CreateSolidBrush.argtypes = [W.DWORD]
@@ -177,7 +178,7 @@ class PreviewWindow:
         self.gdi.SelectObject(dc, previous)
 
     def _message(self, hwnd, message, wp, lp):
-        if message == 0x113:
+        if message in (0x113, 0x8001):
             self.poll()
             return 0
         if message == 0xF:
@@ -194,6 +195,10 @@ class PreviewWindow:
             self.user.PostQuitMessage(0)
             return 0
         return self.user.DefWindowProcW(hwnd, message, wp, lp)
+
+    def request_poll(self):
+        # Wake the UI without waiting for its periodic timer or calling it off-thread.
+        self.user.PostMessageW(self.hwnd, 0x8001, 0, 0)
 
     def hide(self):
         if self.visible:
@@ -228,7 +233,6 @@ class PreviewWindow:
             self.reading_font = self.gdi.CreateFontW(-round(12 * dpi / 96), 0, 0, 0, 400,
                                                      0, 0, 0, 1, 0, 0, 5, 0, 'Yu Gothic UI')
         metrics = layout_metrics(dpi)
-        reading = reading if reading != text else ''
         limit = work.right - work.left
         max_width = min(round(480 * dpi / 96), limit)
         content_limit = max(1, min(max_width - metrics['left'] - metrics['right'],

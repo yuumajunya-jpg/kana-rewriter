@@ -1,6 +1,6 @@
 """Preview composition state and inference ordering, independent of Windows/IPC."""
 from dataclasses import dataclass
-from .text import split_at_caret, TextRegion
+from .text import split_at_caret, TextRegion, reading_spans
 
 
 def preview_position(event):
@@ -14,19 +14,26 @@ def preview_position(event):
 class PreviewTarget(TextRegion):
     display_prefix: str = ''
     display_suffix: str = ''
+    reading_text: str | None = None
 
     def render(self, result):
         return self.display_prefix + result + self.display_suffix
 
 
 def stream_target(before, live, after, config):
+    if config.auto_replace_on_ime_commit:
+        if not any(reading_spans(live)):
+            raise ValueError('入力中の文字に変換対象のかながありません')
+        if len(live) > config.max_chars:
+            raise ValueError('プレビューの文字数上限です')
+        return PreviewTarget(before, live, after, reading_text=live)
     region = split_at_caret(before + live, len(before + live), config.conversion_delimiters,
                             config.stop_at_kanji, config.trailing_punctuation,
                             composition_start=len(before))
     if len(region.target) > config.max_chars:
         raise ValueError('プレビューの文字数上限です')
     return PreviewTarget(region.left, region.target, region.right + after,
-                         region.left[len(before):], region.right)
+                         region.left[len(before):], region.right, live)
 
 
 class PreviewStream:
@@ -76,20 +83,27 @@ class PreviewDisplay:
         self.gate = PreviewGate()
         self.session = None
         self.result = None
-        self.reading = ''
+        self.current_reading = ''
         self.completed = -1
         self.requests = {}
+
+    @property
+    def reading(self):
+        return self.current_reading
 
     def observe(self, snapshot, now):
         session = snapshot[5] if snapshot else None
         if session != self.session or snapshot is None:
             self.result = None
-            self.reading = ''
+            self.current_reading = ''
             self.completed = -1
             self.requests.clear()
         self.session = session
         self.gate.observe((session, snapshot[0]) if snapshot else None, now)
         if snapshot:
+            target = snapshot[1]
+            self.current_reading = ((target.reading_text if target.reading_text is not None else target.target)
+                                    if isinstance(target, PreviewTarget) else '')
             self.requests[self.gate.generation] = (session, snapshot[1])
             if len(self.requests) > 128:
                 self.requests.pop(next(iter(self.requests)))
@@ -99,8 +113,6 @@ class PreviewDisplay:
         if request and request[0] == self.session and generation > self.completed and result:
             target = request[1]
             self.result = target.render(result) if isinstance(target, PreviewTarget) else result
-            self.reading = (target.target if isinstance(target, PreviewTarget)
-                            and result != target.target else '')
             self.completed = generation
 
 
